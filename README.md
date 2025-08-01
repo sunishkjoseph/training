@@ -28,7 +28,6 @@ python middleware_healthcheck.py --full \
   --ldap-host ldap.example.com
 ```
 
-
 ### Generating reports
 
 Use `report_wrapper.py` to run the health check and save the output in your preferred format. Pass all `middleware_healthcheck.py` arguments after `--`:
@@ -36,5 +35,4 @@ Use `report_wrapper.py` to run the health check and save the output in your pref
 ```bash
 python report_wrapper.py --format json --output report.json -- --full --servers AdminServer1
 ```
-=======
 
