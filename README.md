@@ -27,3 +27,11 @@ python middleware_healthcheck.py --full \
   --username weblogic --password welcome1 \
   --ldap-host ldap.example.com
 ```
+
+### Generating reports
+
+Use `report_wrapper.py` to run the health check and save the output in your preferred format. Pass all `middleware_healthcheck.py` arguments after `--`:
+
+```bash
+python report_wrapper.py --format json --output report.json -- --full --servers AdminServer1
+```
