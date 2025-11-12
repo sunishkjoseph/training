@@ -1,0 +1,22 @@
+{
+  "name": "oci-genai-agent-chat",
+  "version": "0.1.0",
+  "description": "Oracle JET chat client for interacting with OCI Generative AI Agents.",
+  "private": true,
+  "scripts": {
+    "start": "ojet serve",
+    "build": "ojet build --release",
+    "test": "npm run lint",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@oracle/oraclejet": "^15.1.2",
+    "@oracle/oraclejet-core-pack": "^15.1.2",
+    "js-yaml": "^4.1.0",
+    "ojs": "^15.1.2"
+  },
+  "devDependencies": {
+    "@oracle/oraclejet-tooling": "^15.1.2",
+    "eslint": "^8.57.0"
+  }
+}
