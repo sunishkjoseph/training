@@ -1,8 +1,78 @@
 import argparse
+import html
 import json
 import subprocess
 import sys
-import html
+from io import BytesIO
+from pathlib import Path
+
+
+def _escape_pdf_text(value: str) -> str:
+    """Escape text for inclusion in a PDF string."""
+    return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _write_pdf(lines, output_path):
+    """Write lines of text to a simple PDF file without extra dependencies."""
+    lines = lines or [""]
+    content_parts = ["BT", "/F1 12 Tf", "14 TL", "72 720 Td"]
+    for index, line in enumerate(lines):
+        if index:
+            content_parts.append("T*")
+        content_parts.append(f"({_escape_pdf_text(line)}) Tj")
+    content_parts.append("ET")
+    content_bytes = "\n".join(content_parts).encode("latin-1", "replace")
+
+    buffer = BytesIO()
+    buffer.write(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = []
+
+    def add_object(obj_id, body_bytes):
+        offsets.append(buffer.tell())
+        buffer.write(f"{obj_id} 0 obj\n".encode("latin-1"))
+        buffer.write(body_bytes)
+        buffer.write(b"\nendobj\n")
+
+    add_object(1, b"<< /Type /Catalog /Pages 2 0 R >>")
+    add_object(2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+    add_object(
+        3,
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R "
+        b"/Resources << /Font << /F1 4 0 R >> >> >>",
+    )
+    add_object(4, b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>")
+    add_object(
+        5,
+        b"<< /Length "
+        + str(len(content_bytes)).encode("latin-1")
+        + b" >>\nstream\n"
+        + content_bytes
+        + b"\nendstream",
+    )
+
+    xref_offset = buffer.tell()
+    buffer.write(b"xref\n0 6\n0000000000 65535 f \n")
+    for offset in offsets:
+        buffer.write(f"{offset:010d} 00000 n \n".encode("latin-1"))
+    buffer.write(b"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n")
+    buffer.write(str(xref_offset).encode("latin-1"))
+    buffer.write(b"\n%%EOF")
+
+    Path(output_path).write_bytes(buffer.getvalue())
+
+
+def _escape_rtf(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
+
+
+def _write_doc(lines, output_path):
+    """Write lines of text to a simple RTF document with a .doc extension."""
+    lines = lines or [""]
+    rtf_lines = ["{\\rtf1\\ansi"]
+    for line in lines:
+        rtf_lines.append(_escape_rtf(line) + "\\line")
+    rtf_lines.append("}")
+    Path(output_path).write_text("\n".join(rtf_lines), encoding="utf-8")
 
 
 def main():
@@ -34,8 +104,10 @@ def main():
 
     output = result.stdout
 
+    lines = output.splitlines()
+
     if args.format == "json":
-        data = {"output": output.splitlines()}
+        data = {"output": lines}
         with open(args.output, "w") as f:
             json.dump(data, f, indent=2)
         return
@@ -47,29 +119,11 @@ def main():
         return
 
     if args.format == "pdf":
-        try:
-            from fpdf import FPDF
-        except Exception:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "fpdf"])
-            from fpdf import FPDF
-        pdf = FPDF()
-        pdf.add_page()
-        pdf.set_font("Courier", size=12)
-        for line in output.splitlines() or [""]:
-            pdf.cell(0, 10, txt=line, ln=1)
-        pdf.output(args.output)
+        _write_pdf(lines, args.output)
         return
 
     if args.format == "doc":
-        try:
-            from docx import Document
-        except Exception:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "python-docx"])
-            from docx import Document
-        doc = Document()
-        for line in output.splitlines():
-            doc.add_paragraph(line)
-        doc.save(args.output)
+        _write_doc(lines, args.output)
         return
 
 
