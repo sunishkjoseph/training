@@ -2,6 +2,21 @@
 
 This repository contains sample scripts and notes. The `middleware_healthcheck.py` script performs basic health checks for Oracle Fusion Middleware environments.
 
+## Download the OCI Generative AI chat demo
+
+To create a distributable archive of the Oracle JET Generative AI chat application, run the packaging script and share the resulting zip file:
+
+```bash
+./scripts/package-archive.sh
+```
+
+The script produces `ojet-oci-genai-chat.zip` in the repository root while omitting transient directories such as `node_modules/`. Pass a custom filename if you prefer a different archive name:
+
+```bash
+./scripts/package-archive.sh my-custom-chat.zip
+```
+
+
 ## Requirements
 
 - Python 3.8 or newer

@@ -1,0 +1,23 @@
+{
+  "app": {
+    "namespace": "oci.genai.chat",
+    "name": "oci-genai-agent-chat",
+    "version": "0.1.0",
+    "type": "web",
+    "description": "Chat UI for OCI Generative AI agent interactions"
+  },
+  "serve": {
+    "destination": "web",
+    "platformOptions": {
+      "web": {
+        "defaultBrowser": "chrome"
+      }
+    }
+  },
+  "paths": {
+    "src": "src",
+    "base": ".",
+    "stagingPath": "web/js",
+    "web": "web"
+  }
+}
