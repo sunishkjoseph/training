@@ -24,6 +24,41 @@ except ImportError:  # pragma: no cover - Python 2 / Jython fallback
     io_open = open
 
 
+def normalize_collections(value, current_key=None):
+    """Convert list-based collections into dictionaries keyed by names."""
+
+    key_getters = {
+        'clusters': lambda item: item.get('name'),
+        'servers': lambda item: item.get('name'),
+        'jmsServers': lambda item: item.get('name'),
+        'destinations': lambda item: item.get('name'),
+        'datasources': lambda item: item.get('name'),
+        'deployments': lambda item: item.get('name'),
+        'composites': lambda item: (
+            f"{item.get('partition') or item.get('partitionName') or 'default'}::{item.get('name')}"
+            if item.get('name')
+            else None
+        ),
+        'threads': lambda item: item.get('server') or item.get('name'),
+    }
+
+    if isinstance(value, list):
+        getter = key_getters.get(current_key, lambda item: item.get('name') if isinstance(item, dict) else None)
+        mapping = {}
+        for index, item in enumerate(value, start=1):
+            if isinstance(item, dict):
+                key = getter(item) or f"{current_key or 'item'}_{index}"
+                mapping[key] = normalize_collections(item)
+            else:
+                mapping[f"{current_key or 'item'}_{index}"] = item
+        return mapping
+
+    if isinstance(value, dict):
+        return {key: normalize_collections(child, key) for key, child in value.items()}
+
+    return value
+
+
 def load_sample_payload(check):
     path = os.environ.get('WLST_SAMPLE_OUTPUT')
     if not path or not os.path.exists(path):
@@ -35,6 +70,8 @@ def load_sample_payload(check):
     except TypeError:  # pragma: no cover - ``encoding`` not supported
         with io_open(path, 'r') as handle:
             payload = json.load(handle)
+
+    payload = normalize_collections(payload)
 
     if check == 'all' or check is None:
         return payload
@@ -92,16 +129,17 @@ def ensure_domain_runtime():
 
 
 def fetch_clusters():  # pragma: no cover - WLST environment only
-    clusters = []
+    clusters = {}
     try:
         ensure_domain_runtime()
         runtimes = cmo.getClusterRuntimes()
         if runtimes:
             for runtime in runtimes:
+                name = getattr(runtime, 'getName', lambda: None)()
                 cluster_info = {
-                    'name': runtime.getName(),
-                    'state': runtime.getState(),
-                    'servers': [],
+                    'name': name,
+                    'state': getattr(runtime, 'getState', lambda: None)(),
+                    'servers': {},
                 }
                 try:
                     server_runtimes = getattr(runtime, 'getServerRuntimes', lambda: [])()
@@ -109,19 +147,22 @@ def fetch_clusters():  # pragma: no cover - WLST environment only
                     server_runtimes = getattr(runtime, 'getServers', lambda: [])()
                 for server in server_runtimes or []:
                     health = getattr(server, 'getHealthState', lambda: None)()
-                    cluster_info['servers'].append({
-                        'name': getattr(server, 'getName', lambda: None)(),
+                    server_name = getattr(server, 'getName', lambda: None)()
+                    cluster_info['servers'][server_name or f'server_{len(cluster_info["servers"]) + 1}'] = {
+                        'name': server_name,
                         'state': getattr(server, 'getState', lambda: None)(),
                         'health': normalize_health_state(health),
-                    })
-                clusters.append(cluster_info)
+                    }
+                key = name or f'cluster_{len(clusters) + 1}'
+                clusters[key] = cluster_info
     except Exception as exc:
-        clusters.append({'name': 'ERROR', 'state': str(exc)})
+        key = f'cluster_error_{len(clusters) + 1}'
+        clusters[key] = {'name': 'ERROR', 'state': str(exc)}
     return clusters
 
 
 def fetch_managed_servers():  # pragma: no cover - WLST environment only
-    servers = []
+    servers = {}
     try:
         ensure_domain_runtime()
         runtimes = cmo.getServerRuntimes()
@@ -137,8 +178,9 @@ def fetch_managed_servers():  # pragma: no cover - WLST environment only
                 except Exception:
                     heap_current = heap_runtime.getHeapSizeCurrent() if hasattr(heap_runtime, 'getHeapSizeCurrent') else None
                     heap_max = heap_runtime.getHeapSizeMax() if hasattr(heap_runtime, 'getHeapSizeMax') else None
-            servers.append({
-                'name': runtime.getName() if hasattr(runtime, 'getName') else None,
+            name = runtime.getName() if hasattr(runtime, 'getName') else None
+            servers[name or f'server_{len(servers) + 1}'] = {
+                'name': name,
                 'state': runtime.getState() if hasattr(runtime, 'getState') else None,
                 'cluster': getattr(runtime, 'getClusterName', lambda: None)(),
                 'health': normalize_health_state(health),
@@ -146,14 +188,14 @@ def fetch_managed_servers():  # pragma: no cover - WLST environment only
                 'listenPort': getattr(runtime, 'getListenPort', lambda: None)(),
                 'heapCurrent': heap_current,
                 'heapMax': heap_max,
-            })
+            }
     except Exception as exc:
-        servers.append({'name': 'ERROR', 'state': str(exc)})
+        servers[f'server_error_{len(servers) + 1}'] = {'name': 'ERROR', 'state': str(exc)}
     return servers
 
 
 def fetch_threads():  # pragma: no cover - WLST environment only
-    thread_pools = []
+    thread_pools = {}
     try:
         ensure_domain_runtime()
         runtimes = cmo.getServerRuntimes()
@@ -187,14 +229,14 @@ def fetch_threads():  # pragma: no cover - WLST environment only
                     entry['throughput'] = throughput()
                 except Exception:
                     entry['throughput'] = None
-            thread_pools.append(entry)
+            thread_pools[name or f'threadPool_{len(thread_pools) + 1}'] = entry
     except Exception as exc:
-        thread_pools.append({'server': 'ERROR', 'state': str(exc)})
+        thread_pools[f'thread_error_{len(thread_pools) + 1}'] = {'server': 'ERROR', 'state': str(exc)}
     return thread_pools
 
 
 def fetch_jms_servers():  # pragma: no cover - WLST environment only
-    servers = []
+    servers = {}
     try:
         ensure_domain_runtime()
         jms_runtime = getattr(cmo, 'getJMSRuntime', lambda: None)()
@@ -205,116 +247,130 @@ def fetch_jms_servers():  # pragma: no cover - WLST environment only
             server_runtimes = cmo.getJMSServers()
         for runtime in server_runtimes or []:
             health = getattr(runtime, 'getHealthState', lambda: None)()
-            destinations = []
+            destinations = {}
             try:
                 destination_runtimes = getattr(runtime, 'getDestinations', lambda: [])()
             except Exception:
                 destination_runtimes = []
             for dest in destination_runtimes or []:
-                destinations.append({
-                    'name': getattr(dest, 'getName', lambda: None)(),
+                dest_name = getattr(dest, 'getName', lambda: None)()
+                destinations[dest_name or f'destination_{len(destinations) + 1}'] = {
+                    'name': dest_name,
                     'type': getattr(dest, 'getType', lambda: None)(),
                     'messagesCurrentCount': getattr(dest, 'getMessagesCurrentCount', lambda: None)(),
                     'messagesHighCount': getattr(dest, 'getMessagesHighCount', lambda: None)(),
                     'consumersCurrentCount': getattr(dest, 'getConsumersCurrentCount', lambda: None)(),
-                })
-            servers.append({
-                'name': getattr(runtime, 'getName', lambda: None)(),
+                }
+            name = getattr(runtime, 'getName', lambda: None)()
+            servers[name or f'jmsServer_{len(servers) + 1}'] = {
+                'name': name,
                 'state': getattr(runtime, 'getState', lambda: None)(),
                 'health': normalize_health_state(health),
                 'destinations': destinations,
-            })
+            }
     except Exception as exc:
-        servers.append({'name': 'ERROR', 'state': str(exc)})
+        servers[f'jms_error_{len(servers) + 1}'] = {'name': 'ERROR', 'state': str(exc)}
     return servers
 
 
 def fetch_datasources():  # pragma: no cover - WLST environment only
-    datasources = []
+    datasources = {}
     try:
         ensure_domain_runtime()
         service = cmo.getJDBCServiceRuntime()
         if service:
             for runtime in service.getJDBCDataSourceRuntimeMBeans():
-                datasources.append({
-                    'name': runtime.getName(),
+                name = runtime.getName()
+                datasources[name or f'datasource_{len(datasources) + 1}'] = {
+                    'name': name,
                     'state': runtime.getState(),
                     'activeConnectionsCurrentCount': runtime.getActiveConnectionsCurrentCount(),
-                })
+                }
     except Exception as exc:
-        datasources.append({'name': 'ERROR', 'state': str(exc)})
+        datasources[f'datasource_error_{len(datasources) + 1}'] = {'name': 'ERROR', 'state': str(exc)}
     return datasources
 
 
 def fetch_deployments():  # pragma: no cover - WLST environment only
-    deployments = []
+    deployments = {}
     try:
         ensure_domain_runtime()
         runtime = cmo.lookupAppRuntimeStateRuntime()
         if runtime:
             for app in runtime.getAppDeploymentStateRuntimes():
-                deployments.append({
-                    'name': app.getName(),
+                name = app.getName()
+                deployments[name or f'deployment_{len(deployments) + 1}'] = {
+                    'name': name,
                     'state': app.getState(),
-                })
+                }
     except Exception as exc:
-        deployments.append({'name': 'ERROR', 'state': str(exc)})
+        deployments[f'deployment_error_{len(deployments) + 1}'] = {'name': 'ERROR', 'state': str(exc)}
     return deployments
 
 
 def fetch_composites():  # pragma: no cover - WLST environment only
-    composites = []
+    composites = {}
     try:
         soa = globals().get('soa_cluster_state')
         if soa:
-            composites = soa()  # Custom hook provided by customer WLST scripts
-        for composite in composites:
+            composites_list = soa()  # Custom hook provided by customer WLST scripts
+        else:
+            composites_list = []
+        for composite in composites_list:
             if 'version' not in composite and hasattr(composite, 'getRevision'):  # pragma: no cover
                 try:
                     composite['version'] = composite.getRevision()
                 except Exception:
                     composite['version'] = None
+            name = composite.get('name')
+            partition = composite.get('partition') or composite.get('partitionName')
+            key = f"{partition or 'default'}::{name}" if name else f'composite_{len(composites) + 1}'
+            composites[key] = composite
     except Exception as exc:
-        composites.append({'name': 'ERROR', 'state': str(exc)})
+        composites[f'composite_error_{len(composites) + 1}'] = {'name': 'ERROR', 'state': str(exc)}
     return composites
 
 
 def gather(check, username, password, admin_url):
     sample_payload = load_sample_payload(check)
     if sample_payload is not None and not sample_payload:
-        return sample_payload
+        return normalize_collections(sample_payload)
     if sample_payload:
         sample_payload['generatedAt'] = datetime.utcnow().isoformat() + 'Z'
         sample_payload['source'] = 'sample'
-        return sample_payload
+        return normalize_collections(sample_payload)
 
     if not connect_if_available(username, password, admin_url):
-        return {'error': 'WLST runtime not available and no sample payload supplied'}
+        return normalize_collections(
+            {'error': 'WLST runtime not available and no sample payload supplied'}
+        )
 
     if check == 'cluster':
-        return {'clusters': fetch_clusters()}
+        return normalize_collections({'clusters': fetch_clusters()})
     if check == 'managed_servers':
-        return {'servers': fetch_managed_servers()}
+        return normalize_collections({'servers': fetch_managed_servers()})
     if check == 'jms':
-        return {'jmsServers': fetch_jms_servers()}
+        return normalize_collections({'jmsServers': fetch_jms_servers()})
     if check == 'threads':
-        return {'threads': fetch_threads()}
+        return normalize_collections({'threads': fetch_threads()})
     if check == 'datasource':
-        return {'datasources': fetch_datasources()}
+        return normalize_collections({'datasources': fetch_datasources()})
     if check == 'deployments':
-        return {'deployments': fetch_deployments()}
+        return normalize_collections({'deployments': fetch_deployments()})
     if check == 'composites':
-        return {'composites': fetch_composites()}
+        return normalize_collections({'composites': fetch_composites()})
 
-    return {
-        'clusters': fetch_clusters(),
-        'servers': fetch_managed_servers(),
-        'jmsServers': fetch_jms_servers(),
-        'threads': fetch_threads(),
-        'datasources': fetch_datasources(),
-        'deployments': fetch_deployments(),
-        'composites': fetch_composites(),
-    }
+    return normalize_collections(
+        {
+            'clusters': fetch_clusters(),
+            'servers': fetch_managed_servers(),
+            'jmsServers': fetch_jms_servers(),
+            'threads': fetch_threads(),
+            'datasources': fetch_datasources(),
+            'deployments': fetch_deployments(),
+            'composites': fetch_composites(),
+        }
+    )
 
 
 def main():

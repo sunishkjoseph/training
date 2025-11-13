@@ -2,21 +2,6 @@
 
 This repository contains sample scripts and notes. The `middleware_healthcheck.py` script performs basic health checks for Oracle Fusion Middleware environments.
 
-## Download the OCI Generative AI chat demo
-
-To create a distributable archive of the Oracle JET Generative AI chat application, run the packaging script and share the resulting zip file:
-
-```bash
-./scripts/package-archive.sh
-```
-
-The script produces `ojet-oci-genai-chat.zip` in the repository root while omitting transient directories such as `node_modules/`. Pass a custom filename if you prefer a different archive name:
-
-```bash
-./scripts/package-archive.sh my-custom-chat.zip
-```
-
-
 ## Requirements
 
 - Python 3.8 or newer
@@ -59,7 +44,7 @@ username: weblogic
 password: welcome1
 ldap_host: ldap.example.com
 ldap_port: 1389
-wlst_exec: /path/to/weblogic/oracle_common/common/bin/wlst.sh
+wlst_path: /path/to/weblogic/oracle_common/common/bin/wlst.sh
 wlst_script: /path/to/wlst_health_checks.py
 ```
 
@@ -90,12 +75,12 @@ python middleware_healthcheck.py --full \
   --servers AdminServer1,ManagedServer1 \
   --admin-url t3://wls-admin.example.com:7001 \
   --username weblogic --password welcome1 \
-  --wlst-exec /oracle/middleware/oracle_common/common/bin/wlst.sh \
+  --wlst-path /oracle/middleware/oracle_common/common/bin/wlst.sh \
   --wlst-script /opt/tools/wlst_health_checks.py \
   --ldap-host ldap.example.com
 ```
 
-If you do not have access to WLST locally, you can simulate its output by supplying `--wlst-exec python3`, `--wlst-script wlst_health_checks.py`, and `--wlst-sample-output sample_wlst_output.json`. This is how the bundled sample configuration files are wired for quick demos.
+If you do not have access to WLST locally, you can simulate its output by supplying `--wlst-path python3`, `--wlst-script wlst_health_checks.py`, and `--wlst-sample-output sample_wlst_output.json`. (`--wlst-exec` remains available for backward compatibility.) This is how the bundled sample configuration files are wired for quick demos.
 
 ### WLST integration details
 
@@ -109,31 +94,46 @@ For reference, `sample_wlst_output.json` shows the expected JSON structure that 
 {
   "generatedAt": "2024-01-01T00:00:00Z",
   "check": "all",
-  "clusters": [
-    {
+  "clusters": {
+    "ProdCluster": {
       "name": "ProdCluster",
       "state": "RUNNING",
-      "servers": [
-        {"name": "AdminServer", "state": "RUNNING", "health": "HEALTH_OK"},
-        {"name": "soa_server1", "state": "RUNNING", "health": "HEALTH_WARN"}
-      ]
+      "servers": {
+        "AdminServer": {"name": "AdminServer", "state": "RUNNING", "health": "HEALTH_OK"},
+        "soa_server1": {"name": "soa_server1", "state": "RUNNING", "health": "HEALTH_WARN"}
+      }
     }
-  ],
-  "servers": [
-    {"name": "AdminServer", "state": "RUNNING", "health": "HEALTH_OK", "listenAddress": "admin.example.com", "listenPort": 7001, "heapCurrent": 536870912, "heapMax": 1073741824}
-  ],
-  "jmsServers": [
-    {
+  },
+  "servers": {
+    "AdminServer": {
+      "name": "AdminServer",
+      "state": "RUNNING",
+      "cluster": null,
+      "health": "HEALTH_OK",
+      "listenAddress": "admin.example.com",
+      "listenPort": 7001,
+      "heapCurrent": 536870912,
+      "heapMax": 1073741824
+    }
+  },
+  "jmsServers": {
+    "JMSServer1": {
       "name": "JMSServer1",
       "state": "RUNNING",
       "health": "HEALTH_OK",
-      "destinations": [
-        {"name": "RequestQueue", "type": "Queue", "messagesCurrentCount": 10, "messagesHighCount": 50, "consumersCurrentCount": 2}
-      ]
+      "destinations": {
+        "RequestQueue": {
+          "name": "RequestQueue",
+          "type": "Queue",
+          "messagesCurrentCount": 10,
+          "messagesHighCount": 50,
+          "consumersCurrentCount": 2
+        }
+      }
     }
-  ],
-  "threads": [
-    {
+  },
+  "threads": {
+    "AdminServer": {
       "server": "AdminServer",
       "executeThreadTotalCount": 32,
       "executeThreadIdleCount": 20,
@@ -143,7 +143,7 @@ For reference, `sample_wlst_output.json` shows the expected JSON structure that 
       "queueLength": 0,
       "throughput": 45.5
     },
-    {
+    "soa_server1": {
       "server": "soa_server1",
       "executeThreadTotalCount": 48,
       "executeThreadIdleCount": 30,
@@ -153,14 +153,32 @@ For reference, `sample_wlst_output.json` shows the expected JSON structure that 
       "queueLength": 3,
       "throughput": 38.2
     }
-  ],
-  "datasources": [{"name": "SOADataSource", "state": "Running", "activeConnectionsCurrentCount": 12}],
-  "deployments": [{"name": "soa-infra", "state": "ACTIVE"}, {"name": "SampleApp", "state": "ACTIVE"}],
-  "composites": [{"partition": "default", "name": "OrderProcessor", "state": "active", "version": "1.0"}]
+  },
+  "datasources": {
+    "SOADataSource": {
+      "name": "SOADataSource",
+      "state": "Running",
+      "activeConnectionsCurrentCount": 12
+    }
+  },
+  "deployments": {
+    "soa-infra": {"name": "soa-infra", "state": "ACTIVE"},
+    "SampleApp": {"name": "SampleApp", "state": "ACTIVE"}
+  },
+  "composites": {
+    "default::OrderProcessor": {
+      "partition": "default",
+      "name": "OrderProcessor",
+      "state": "active",
+      "version": "1.0"
+    }
+  }
 }
 ```
 
 The repository also includes `sample_healthcheck_output.txt`, which captures a full CLI run using the bundled sample data so you can preview the formatted output.
+
+> **Why no arrays?** The WLST helper returns dictionaries keyed by resource name (clusters, servers, JMS destinations, etc.) so the JSON never relies on square brackets. This matches environments that prefer objects over arrays and still allows the CLI to iterate over the values in order.
 
 ### Generating reports
 

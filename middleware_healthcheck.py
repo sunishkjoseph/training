@@ -56,20 +56,41 @@ def placeholder(message):
 
     print(
         f"[INFO] {message} check is unavailable because no WLST script has been configured. "
-        "Provide the --wlst-exec and --wlst-script parameters or update the config file."
+        "Provide the --wlst-path/--wlst-exec and --wlst-script parameters or update the config file."
     )
+
+
+def iter_named_items(value, default_key='name'):
+    """Yield (name, payload) pairs from dict- or list-like collections."""
+
+    if isinstance(value, dict):
+        for key, payload in value.items():
+            yield key, payload
+        return
+
+    for payload in value or []:
+        if isinstance(payload, dict):
+            yield payload.get(default_key), payload
+        else:
+            yield None, payload
 
 
 def run_wlst(check, args):
     """Invoke the configured WLST script and return the JSON payload it emits."""
 
-    if not args.wlst_script or not args.wlst_exec:
+    exec_path = getattr(args, 'wlst_path', None) or getattr(args, 'wlst_exec', None)
+    script_path = args.wlst_script
+
+    if not script_path or not exec_path:
         placeholder(check.title())
         return None
 
+    script_path = str(Path(script_path).expanduser().resolve())
+    exec_path = str(Path(exec_path).expanduser())
+
     command = [
-        args.wlst_exec,
-        args.wlst_script,
+        exec_path,
+        script_path,
         check,
         args.admin_url or '',
         args.username or '',
@@ -90,7 +111,7 @@ def run_wlst(check, args):
             env=env,
         )
     except FileNotFoundError as exc:
-        print(f"[ERROR] WLST executable '{args.wlst_exec}' not found: {exc}")
+        print(f"[ERROR] WLST executable '{exec_path}' not found: {exc}")
         return None
 
     if result.returncode != 0:
@@ -125,15 +146,13 @@ def check_cluster(args):
     if not data:
         return
 
-    clusters = data.get('clusters') or data.get('items', [])
+    clusters = data.get('clusters') or data.get('items', {})
     if not clusters:
         print("No clusters found")
-    for cluster in clusters:
-        name = cluster.get('name')
+    for name, cluster in iter_named_items(clusters):
         state = cluster.get('state') or cluster.get('status') or cluster.get('stateReturn')
         print(f"Cluster {name}: {state}")
-        for server in cluster.get('servers', []):
-            server_name = server.get('name')
+        for server_name, server in iter_named_items(cluster.get('servers', {})):
             server_state = server.get('state') or server.get('status')
             health = server.get('health')
             details = f" (health: {health})" if health else ''
@@ -147,9 +166,8 @@ def check_managed_servers(args):
     if not data:
         return
 
-    servers = data.get('servers') or data.get('items', [])
-    for server in servers:
-        name = server.get('name')
+    servers = data.get('servers') or data.get('items', {})
+    for name, server in iter_named_items(servers):
         state = server.get('state') or server.get('status')
         health = server.get('health')
         cluster = server.get('cluster')
@@ -176,12 +194,10 @@ def check_jms(args):
     if not data:
         return
 
-    for jms in data.get('jmsServers', []) or data.get('items', []):
-        name = jms.get('name')
+    for name, jms in iter_named_items(data.get('jmsServers') or data.get('items', {})):
         state = jms.get('state') or jms.get('health') or jms.get('healthState', {}).get('state')
         print(f"JMS Server {name}: {state}")
-        for destination in jms.get('destinations', []):
-            dest_name = destination.get('name')
+        for dest_name, destination in iter_named_items(jms.get('destinations')):
             dest_type = destination.get('type')
             pending = destination.get('messagesCurrentCount')
             high = destination.get('messagesHighCount')
@@ -205,13 +221,13 @@ def check_threads(args):
     if not data:
         return
 
-    pools = data.get('threads') or data.get('threadPools') or data.get('items', [])
+    pools = data.get('threads') or data.get('threadPools') or data.get('items', {})
     if not pools:
         print("No thread pool data returned")
         return
 
-    for pool in pools:
-        server = pool.get('server') or pool.get('name')
+    for server_key, pool in iter_named_items(pools, default_key='server'):
+        server = server_key or pool.get('server') or pool.get('name')
         total = pool.get('executeThreadTotalCount')
         idle = pool.get('executeThreadIdleCount')
         hogging = pool.get('hoggingThreadCount')
@@ -247,8 +263,7 @@ def check_datasource(args):
     if not data:
         return
 
-    for ds in data.get('datasources', []) or data.get('items', []):
-        name = ds.get('name')
+    for name, ds in iter_named_items(data.get('datasources') or data.get('items', {})):
         state = ds.get('state') or ds.get('status') or ds.get('stateReturn')
         active = ds.get('activeConnectionsCurrentCount')
         additional = f", Active={active}" if active is not None else ''
@@ -262,8 +277,7 @@ def check_deployments(args):
     if not data:
         return
 
-    for app in data.get('deployments', []) or data.get('items', []):
-        name = app.get('name')
+    for name, app in iter_named_items(data.get('deployments') or data.get('items', {})):
         state = app.get('state') or app.get('status') or app.get('stateReturn')
         print(f"Deployment {name}: {state}")
 
@@ -275,15 +289,15 @@ def check_composites(args):
     if not data:
         return
 
-    composites = data.get('composites') or data.get('items', [])
-    for composite in composites:
+    composites = data.get('composites') or data.get('items', {})
+    for name, composite in iter_named_items(composites):
         partition = composite.get('partition') or composite.get('partitionName')
-        name = composite.get('name')
+        composite_name = composite.get('name') or name
         state = composite.get('state')
         version = composite.get('version') or composite.get('revision') or composite.get('compositeVersion')
         prefix = f"{partition}/" if partition else ''
         version_info = f" (version {version})" if version else ''
-        print(f"Composite {prefix}{name}: {state}{version_info}")
+        print(f"Composite {prefix}{composite_name}: {state}{version_info}")
 
 
 def check_ldap(host, port):
@@ -349,7 +363,9 @@ def apply_config(args, config):
             args.ldap_port = int(config['ldap_port'])
         except (TypeError, ValueError):
             raise ValueError("ldap_port must be an integer")
-    if 'wlst_exec' in config and args.wlst_exec is None:
+    if 'wlst_path' in config and getattr(args, 'wlst_path', None) is None:
+        args.wlst_path = config['wlst_path']
+    if 'wlst_exec' in config and args.wlst_exec is None and getattr(args, 'wlst_path', None) is None:
         args.wlst_exec = config['wlst_exec']
     if 'wlst_script' in config and args.wlst_script is None:
         args.wlst_script = config['wlst_script']
@@ -368,7 +384,8 @@ def main():
     parser.add_argument('--password', help='Admin password for WLST checks')
     parser.add_argument('--ldap-host', help='LDAP hostname to check')
     parser.add_argument('--ldap-port', type=int, default=389, help='LDAP port (default 389)')
-    parser.add_argument('--wlst-exec', help='Path to wlst.sh (or python3 for local testing)')
+    parser.add_argument('--wlst-path', help='Path to wlst.sh (preferred)')
+    parser.add_argument('--wlst-exec', help='Path to legacy WLST executable (deprecated)')
     parser.add_argument('--wlst-script', help='Path to the WLST script that emits JSON status')
     parser.add_argument('--wlst-sample-output', help='Path to a JSON file used to simulate WLST output')
     args = parser.parse_args()

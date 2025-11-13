@@ -6,7 +6,7 @@
   "password": "welcome1",
   "ldap_host": "ldap.example.com",
   "ldap_port": 1389,
-  "wlst_exec": "python3",
+  "wlst_path": "python3",
   "wlst_script": "wlst_health_checks.py",
   "wlst_sample_output": "sample_wlst_output.json"
 }
