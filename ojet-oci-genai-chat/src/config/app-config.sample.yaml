@@ -1,0 +1,10 @@
+service:
+  endpoint: https://generativeai.<region>.oci.oraclecloud.com
+  agentId: ocid1.generativeagent.oc1..exampleuniqueID
+  channel: web
+
+# For demo purposes this uses a static token header. Replace with a valid
+# Authorization header value or configure a reverse proxy that injects it.
+auth:
+  header: Authorization
+  token: Bearer <oci-auth-token>
