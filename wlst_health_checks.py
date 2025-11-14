@@ -35,7 +35,10 @@ def normalize_collections(value, current_key=None):
         'datasources': lambda item: item.get('name'),
         'deployments': lambda item: item.get('name'),
         'composites': lambda item: (
-            f"{item.get('partition') or item.get('partitionName') or 'default'}::{item.get('name')}"
+            "{}::{}".format(
+                item.get('partition') or item.get('partitionName') or 'default',
+                item.get('name')
+            )
             if item.get('name')
             else None
         ),
@@ -47,16 +50,23 @@ def normalize_collections(value, current_key=None):
         mapping = {}
         for index, item in enumerate(value, start=1):
             if isinstance(item, dict):
-                key = getter(item) or f"{current_key or 'item'}_{index}"
+                key = getter(item) or "{}_{}".format(current_key or 'item', index)
                 mapping[key] = normalize_collections(item)
             else:
-                mapping[f"{current_key or 'item'}_{index}"] = item
+                mapping["{}_{}".format(current_key or 'item', index)] = item
         return mapping
 
     if isinstance(value, dict):
         return {key: normalize_collections(child, key) for key, child in value.items()}
 
     return value
+
+
+def next_key(prefix, container):
+    """Return a fallback key using the container size as the index."""
+
+    count = len(container) + 1 if hasattr(container, '__len__') else 1
+    return "{}_{}".format(prefix, count)
 
 
 def load_sample_payload(check):
@@ -116,7 +126,7 @@ def connect_if_available(username, password, admin_url):
         connect_fn(username, password, admin_url)
         return True
     except Exception as exc:  # pragma: no cover - WLST environment only
-        print(json.dumps({'error': f'Failed to connect via WLST: {exc}'}))
+        print(json.dumps({'error': 'Failed to connect via WLST: {}'.format(exc)}))
         sys.exit(1)
 
 
@@ -148,16 +158,17 @@ def fetch_clusters():  # pragma: no cover - WLST environment only
                 for server in server_runtimes or []:
                     health = getattr(server, 'getHealthState', lambda: None)()
                     server_name = getattr(server, 'getName', lambda: None)()
-                    cluster_info['servers'][server_name or f'server_{len(cluster_info["servers"]) + 1}'] = {
+                    server_key = server_name or next_key('server', cluster_info['servers'])
+                    cluster_info['servers'][server_key] = {
                         'name': server_name,
                         'state': getattr(server, 'getState', lambda: None)(),
                         'health': normalize_health_state(health),
                     }
-                key = name or f'cluster_{len(clusters) + 1}'
+                key = name or next_key('cluster', clusters)
                 clusters[key] = cluster_info
     except Exception as exc:
-        key = f'cluster_error_{len(clusters) + 1}'
-        clusters[key] = {'name': 'ERROR', 'state': str(exc)}
+        error_key = next_key('cluster_error', clusters)
+        clusters[error_key] = {'name': 'ERROR', 'state': str(exc)}
     return clusters
 
 
@@ -179,7 +190,8 @@ def fetch_managed_servers():  # pragma: no cover - WLST environment only
                     heap_current = heap_runtime.getHeapSizeCurrent() if hasattr(heap_runtime, 'getHeapSizeCurrent') else None
                     heap_max = heap_runtime.getHeapSizeMax() if hasattr(heap_runtime, 'getHeapSizeMax') else None
             name = runtime.getName() if hasattr(runtime, 'getName') else None
-            servers[name or f'server_{len(servers) + 1}'] = {
+            server_key = name or next_key('server', servers)
+            servers[server_key] = {
                 'name': name,
                 'state': runtime.getState() if hasattr(runtime, 'getState') else None,
                 'cluster': getattr(runtime, 'getClusterName', lambda: None)(),
@@ -190,7 +202,8 @@ def fetch_managed_servers():  # pragma: no cover - WLST environment only
                 'heapMax': heap_max,
             }
     except Exception as exc:
-        servers[f'server_error_{len(servers) + 1}'] = {'name': 'ERROR', 'state': str(exc)}
+        error_key = next_key('server_error', servers)
+        servers[error_key] = {'name': 'ERROR', 'state': str(exc)}
     return servers
 
 
@@ -229,9 +242,11 @@ def fetch_threads():  # pragma: no cover - WLST environment only
                     entry['throughput'] = throughput()
                 except Exception:
                     entry['throughput'] = None
-            thread_pools[name or f'threadPool_{len(thread_pools) + 1}'] = entry
+            pool_key = name or next_key('threadPool', thread_pools)
+            thread_pools[pool_key] = entry
     except Exception as exc:
-        thread_pools[f'thread_error_{len(thread_pools) + 1}'] = {'server': 'ERROR', 'state': str(exc)}
+        error_key = next_key('thread_error', thread_pools)
+        thread_pools[error_key] = {'server': 'ERROR', 'state': str(exc)}
     return thread_pools
 
 
@@ -254,7 +269,8 @@ def fetch_jms_servers():  # pragma: no cover - WLST environment only
                 destination_runtimes = []
             for dest in destination_runtimes or []:
                 dest_name = getattr(dest, 'getName', lambda: None)()
-                destinations[dest_name or f'destination_{len(destinations) + 1}'] = {
+                dest_key = dest_name or next_key('destination', destinations)
+                destinations[dest_key] = {
                     'name': dest_name,
                     'type': getattr(dest, 'getType', lambda: None)(),
                     'messagesCurrentCount': getattr(dest, 'getMessagesCurrentCount', lambda: None)(),
@@ -262,14 +278,16 @@ def fetch_jms_servers():  # pragma: no cover - WLST environment only
                     'consumersCurrentCount': getattr(dest, 'getConsumersCurrentCount', lambda: None)(),
                 }
             name = getattr(runtime, 'getName', lambda: None)()
-            servers[name or f'jmsServer_{len(servers) + 1}'] = {
+            server_key = name or next_key('jmsServer', servers)
+            servers[server_key] = {
                 'name': name,
                 'state': getattr(runtime, 'getState', lambda: None)(),
                 'health': normalize_health_state(health),
                 'destinations': destinations,
             }
     except Exception as exc:
-        servers[f'jms_error_{len(servers) + 1}'] = {'name': 'ERROR', 'state': str(exc)}
+        error_key = next_key('jms_error', servers)
+        servers[error_key] = {'name': 'ERROR', 'state': str(exc)}
     return servers
 
 
@@ -281,13 +299,15 @@ def fetch_datasources():  # pragma: no cover - WLST environment only
         if service:
             for runtime in service.getJDBCDataSourceRuntimeMBeans():
                 name = runtime.getName()
-                datasources[name or f'datasource_{len(datasources) + 1}'] = {
+                datasource_key = name or next_key('datasource', datasources)
+                datasources[datasource_key] = {
                     'name': name,
                     'state': runtime.getState(),
                     'activeConnectionsCurrentCount': runtime.getActiveConnectionsCurrentCount(),
                 }
     except Exception as exc:
-        datasources[f'datasource_error_{len(datasources) + 1}'] = {'name': 'ERROR', 'state': str(exc)}
+        error_key = next_key('datasource_error', datasources)
+        datasources[error_key] = {'name': 'ERROR', 'state': str(exc)}
     return datasources
 
 
@@ -299,12 +319,14 @@ def fetch_deployments():  # pragma: no cover - WLST environment only
         if runtime:
             for app in runtime.getAppDeploymentStateRuntimes():
                 name = app.getName()
-                deployments[name or f'deployment_{len(deployments) + 1}'] = {
+                deployment_key = name or next_key('deployment', deployments)
+                deployments[deployment_key] = {
                     'name': name,
                     'state': app.getState(),
                 }
     except Exception as exc:
-        deployments[f'deployment_error_{len(deployments) + 1}'] = {'name': 'ERROR', 'state': str(exc)}
+        error_key = next_key('deployment_error', deployments)
+        deployments[error_key] = {'name': 'ERROR', 'state': str(exc)}
     return deployments
 
 
@@ -324,10 +346,14 @@ def fetch_composites():  # pragma: no cover - WLST environment only
                     composite['version'] = None
             name = composite.get('name')
             partition = composite.get('partition') or composite.get('partitionName')
-            key = f"{partition or 'default'}::{name}" if name else f'composite_{len(composites) + 1}'
+            if name:
+                key = "{}::{}".format(partition or 'default', name)
+            else:
+                key = next_key('composite', composites)
             composites[key] = composite
     except Exception as exc:
-        composites[f'composite_error_{len(composites) + 1}'] = {'name': 'ERROR', 'state': str(exc)}
+        error_key = next_key('composite_error', composites)
+        composites[error_key] = {'name': 'ERROR', 'state': str(exc)}
     return composites
 
 

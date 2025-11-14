@@ -6,6 +6,41 @@ import sys
 from pathlib import Path
 from socket import create_connection
 
+
+class CommandResult:
+    """Minimal subprocess result compatible with Python 3.6."""
+
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def run_command(command, env=None, capture_stderr=True):
+    """Run a subprocess and return a CommandResult with decoded text streams."""
+
+    stderr_pipe = subprocess.PIPE if capture_stderr else None
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=stderr_pipe,
+        env=env,
+    )
+
+    stdout_data, stderr_data = process.communicate()
+
+    if isinstance(stdout_data, bytes):
+        stdout_text = stdout_data.decode('utf-8', errors='replace')
+    else:
+        stdout_text = stdout_data
+
+    if stderr_pipe and isinstance(stderr_data, bytes):
+        stderr_text = stderr_data.decode('utf-8', errors='replace')
+    else:
+        stderr_text = stderr_data
+
+    return CommandResult(process.returncode, stdout_text, stderr_text)
+
 try:
     import psutil
 except ImportError:  # pragma: no cover - optional dependency
@@ -44,11 +79,7 @@ def check_os_memory():
 def check_servers(names):
     """Check if server processes are running."""
     for name in names:
-        result = subprocess.run(
-            ['pgrep', '-fl', name],
-            stdout=subprocess.PIPE,
-            universal_newlines=True,
-        )
+        result = run_command(['pgrep', '-fl', name], capture_stderr=False)
         if result.stdout.strip():
             print(f"Server '{name}' is running")
         else:
@@ -106,14 +137,7 @@ def run_wlst(check, args):
         env['WLST_SAMPLE_OUTPUT'] = args.wlst_sample_output
 
     try:
-        result = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True,
-            check=False,
-            env=env,
-        )
+        result = run_command(command, env=env)
     except FileNotFoundError as exc:
         print(f"[ERROR] WLST executable '{exec_path}' not found: {exc}")
         return None

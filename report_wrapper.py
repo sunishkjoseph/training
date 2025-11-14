@@ -7,6 +7,37 @@ from io import BytesIO
 from pathlib import Path
 
 
+class CommandResult:
+    """Minimal subprocess result representation compatible with Python 3.6."""
+
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def run_command(command):
+    """Execute a subprocess and return decoded stdout/stderr text."""
+
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    stdout_data, stderr_data = process.communicate()
+    stdout_text = (
+        stdout_data.decode("utf-8", "replace")
+        if isinstance(stdout_data, bytes)
+        else stdout_data
+    )
+    stderr_text = (
+        stderr_data.decode("utf-8", "replace")
+        if isinstance(stderr_data, bytes)
+        else stderr_data
+    )
+    return CommandResult(process.returncode, stdout_text, stderr_text)
+
+
 def _escape_pdf_text(value: str) -> str:
     """Escape text for inclusion in a PDF string."""
     return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
@@ -97,12 +128,7 @@ def main():
     if extra_args and extra_args[0] == "--":
         extra_args = extra_args[1:]
     cmd = [sys.executable, "middleware_healthcheck.py"] + extra_args
-    result = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        universal_newlines=True,
-    )
+    result = run_command(cmd)
     if result.returncode != 0:
         sys.stderr.write(result.stderr)
         sys.exit(result.returncode)
