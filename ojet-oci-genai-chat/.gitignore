@@ -1,0 +1,7 @@
+/node_modules
+/web
+/jet_components
+.DS_Store
+npm-debug.log*
+src/config/app-config.yaml
+src/config/app-config.json

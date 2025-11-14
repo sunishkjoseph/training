@@ -1,0 +1,11 @@
+{
+  "service": {
+    "endpoint": "https://generativeai.<region>.oci.oraclecloud.com",
+    "agentId": "ocid1.generativeagent.oc1..exampleuniqueID",
+    "channel": "web"
+  },
+  "auth": {
+    "header": "Authorization",
+    "token": "Bearer <oci-auth-token>"
+  }
+}
