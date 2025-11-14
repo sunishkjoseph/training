@@ -39,7 +39,7 @@ _error_counters = {
 def _get_error_key(check_type):
     """Generate unique error keys for consistent error tracking."""
     _error_counters[check_type] = _error_counters.get(check_type, 0) + 1
-    return f"{check_type}_error_{_error_counters[check_type]}"
+    return "{0}_error_{1}".format(check_type, _error_counters[check_type])
 
 
 def normalize_collections(value, current_key=None):
@@ -53,7 +53,7 @@ def normalize_collections(value, current_key=None):
         'datasources': lambda item: item.get('name'),
         'deployments': lambda item: item.get('name'),
         'composites': lambda item: (
-            f"{item.get('partition') or item.get('partitionName') or 'default'}::{item.get('name')}"
+            "{0}::{1}".format(item.get('partition') or item.get('partitionName') or 'default', item.get('name'))
             if item.get('name')
             else None
         ),
@@ -65,10 +65,10 @@ def normalize_collections(value, current_key=None):
         mapping = {}
         for index, item in enumerate(value, start=1):
             if isinstance(item, dict):
-                key = getter(item) or f"{current_key or 'item'}_{index}"
+                key = getter(item) or "{0}_{1}".format(current_key or 'item', index)
                 mapping[key] = normalize_collections(item)
             else:
-                mapping[f"{current_key or 'item'}_{index}"] = item
+                mapping["{0}_{1}".format(current_key or 'item', index)] = item
         return mapping
 
     if isinstance(value, dict):
@@ -347,7 +347,7 @@ def fetch_composites():  # pragma: no cover - WLST environment only
                     composite['version'] = None
             name = composite.get('name')
             partition = composite.get('partition') or composite.get('partitionName')
-            key = f"{partition or 'default'}::{name}" if name else f'composite_{len(composites) + 1}'
+            key = "{0}::{1}".format(partition or 'default', name) if name else "composite_{0}".format(len(composites) + 1)
             composites[key] = composite
     except Exception as exc:
         key = _get_error_key('composites')
