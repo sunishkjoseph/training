@@ -84,7 +84,7 @@ def run_wlst(check, args, continue_on_error=False):
         continue_on_error: If True, attempt to parse partial output even on non-zero exit
     """
     exec_path = getattr(args, 'wlst_path', None) or getattr(args, 'wlst_exec', None)
-    script_path = args.wlst_script
+    script_path = getattr(args, 'wlst_script', None)
 
     if not script_path or not exec_path:
         placeholder(check.title())
@@ -103,7 +103,7 @@ def run_wlst(check, args, continue_on_error=False):
     ]
 
     env = os.environ.copy()
-    if args.wlst_sample_output:
+    if getattr(args, 'wlst_sample_output', None):
         env['WLST_SAMPLE_OUTPUT'] = args.wlst_sample_output
 
     try:
@@ -383,11 +383,12 @@ def apply_config(args, config):
             raise ValueError("ldap_port must be an integer")
     if 'wlst_path' in config and getattr(args, 'wlst_path', None) is None:
         args.wlst_path = config['wlst_path']
-    if 'wlst_exec' in config and args.wlst_exec is None and getattr(args, 'wlst_path', None) is None:
+    # Handle legacy wlst_exec if wlst_path not set
+    if 'wlst_exec' in config and getattr(args, 'wlst_exec', None) is None and getattr(args, 'wlst_path', None) is None:
         args.wlst_exec = config['wlst_exec']
-    if 'wlst_script' in config and args.wlst_script is None:
+    if 'wlst_script' in config and getattr(args, 'wlst_script', None) is None:
         args.wlst_script = config['wlst_script']
-    if 'wlst_sample_output' in config and args.wlst_sample_output is None:
+    if 'wlst_sample_output' in config and getattr(args, 'wlst_sample_output', None) is None:
         args.wlst_sample_output = config['wlst_sample_output']
 
 
