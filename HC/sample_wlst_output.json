@@ -1,0 +1,111 @@
+{
+  "generatedAt": "2024-01-01T00:00:00Z",
+  "check": "all",
+  "clusters": {
+    "ProdCluster": {
+      "name": "ProdCluster",
+      "state": "RUNNING",
+      "servers": {
+        "AdminServer": {"name": "AdminServer", "state": "RUNNING", "health": "HEALTH_OK"},
+        "soa_server1": {"name": "soa_server1", "state": "RUNNING", "health": "HEALTH_WARN"}
+      }
+    }
+  },
+  "servers": {
+    "AdminServer": {
+      "name": "AdminServer",
+      "state": "RUNNING",
+      "cluster": null,
+      "health": "HEALTH_OK",
+      "listenAddress": "admin.example.com",
+      "listenPort": 7001,
+      "heapCurrent": 536870912,
+      "heapMax": 1073741824
+    },
+    "soa_server1": {
+      "name": "soa_server1",
+      "state": "RUNNING",
+      "cluster": "ProdCluster",
+      "health": "HEALTH_WARN",
+      "listenAddress": "soa1.example.com",
+      "listenPort": 8001,
+      "heapCurrent": 805306368,
+      "heapMax": 1610612736
+    }
+  },
+  "jmsServers": {
+    "JMSServer1": {
+      "name": "JMSServer1",
+      "state": "RUNNING",
+      "health": "HEALTH_OK",
+      "destinations": {
+        "RequestQueue": {
+          "name": "RequestQueue",
+          "type": "Queue",
+          "messagesCurrentCount": 10,
+          "messagesHighCount": 50,
+          "consumersCurrentCount": 2
+        },
+        "ResponseQueue": {
+          "name": "ResponseQueue",
+          "type": "Queue",
+          "messagesCurrentCount": 0,
+          "messagesHighCount": 5,
+          "consumersCurrentCount": 1
+        }
+      }
+    }
+  },
+  "threads": {
+    "AdminServer": {
+      "server": "AdminServer",
+      "executeThreadTotalCount": 32,
+      "executeThreadIdleCount": 20,
+      "pendingUserRequestCount": 1,
+      "hoggingThreadCount": 0,
+      "stuckThreadCount": 0,
+      "queueLength": 0,
+      "throughput": 45.5
+    },
+    "soa_server1": {
+      "server": "soa_server1",
+      "executeThreadTotalCount": 48,
+      "executeThreadIdleCount": 30,
+      "pendingUserRequestCount": 2,
+      "hoggingThreadCount": 1,
+      "stuckThreadCount": 0,
+      "queueLength": 3,
+      "throughput": 38.2
+    }
+  },
+  "datasources": {
+    "SOADataSource": {
+      "name": "SOADataSource",
+      "state": "Running",
+      "activeConnectionsCurrentCount": 12
+    },
+    "MDSDataSource": {
+      "name": "MDSDataSource",
+      "state": "Running",
+      "activeConnectionsCurrentCount": 4
+    }
+  },
+  "deployments": {
+    "soa-infra": {"name": "soa-infra", "state": "ACTIVE"},
+    "SampleApp": {"name": "SampleApp", "state": "ACTIVE"}
+  },
+  "composites": {
+    "default::OrderProcessor": {
+      "partition": "default",
+      "name": "OrderProcessor",
+      "state": "active",
+      "version": "1.0"
+    },
+    "finance::InvoiceFlow": {
+      "partition": "finance",
+      "name": "InvoiceFlow",
+      "state": "active",
+      "version": "2.3"
+    }
+  }
+}

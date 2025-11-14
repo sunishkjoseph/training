@@ -1,0 +1,31 @@
+<div class="oj-sm-padding-4x chat-shell" aria-live="polite">
+  <oj-messages id="globalMessages" messages="[[messages]]" display="notification"></oj-messages>
+  <div class="chat-window" role="log" aria-label="Conversation transcript">
+    <div class="chat-window__placeholder" data-bind="visible: !isReady()">
+      <oj-progress-circle size="lg"></oj-progress-circle>
+      <p class="chat-window__status" data-bind="text: statusMessage"></p>
+    </div>
+    <oj-bind-for-each data="[[conversation]]">
+      <template>
+        <div class="chat-message" data-bind="css: $current.data.role">
+          <span class="chat-message__role" data-bind="text: $current.data.roleLabel"></span>
+          <p class="chat-message__content" data-bind="text: $current.data.content"></p>
+        </div>
+      </template>
+    </oj-bind-for-each>
+    <oj-progress-circle size="sm" class="chat-window__spinner" data-bind="css: { hidden: !isStreaming() }"></oj-progress-circle>
+  </div>
+  <oj-form-layout direction="row" max-columns="1" class="chat-form" role="form" aria-label="Send a prompt to the agent">
+    <oj-text-area id="prompt" label-hint="Prompt" placeholder="Ask the OCI Generative AI agent anything"
+      value="[[prompt]]" required="true" rows="4" on-raw-value-changed="[[handleInputChange]]"></oj-text-area>
+    <div class="chat-form__actions">
+      <oj-button id="send" on-oj-action="[[handleSend]]" disabled="[[disableSend]]">
+        <span slot="startIcon" class="oj-ux-ico-send"></span>
+        Send
+      </oj-button>
+      <oj-button id="reset" chroming="borderless" on-oj-action="[[handleReset]]">
+        Clear conversation
+      </oj-button>
+    </div>
+  </oj-form-layout>
+</div>

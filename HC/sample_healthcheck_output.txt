@@ -1,0 +1,43 @@
+
+--- CPU ---
+CPU usage: 0.16% (3 cores)
+
+--- MEMORY ---
+Memory usage: 1.80% of 18361MB
+
+--- SERVERS ---
+Server 'AdminServer1' is NOT running
+Server 'ManagedServer1' is NOT running
+
+--- MANAGED_SERVERS ---
+Server AdminServer: RUNNING | Health HEALTH_OK | admin.example.com:7001 | Heap 512.0MB/1024.0MB
+Server soa_server1: RUNNING | Health HEALTH_WARN | Cluster ProdCluster | soa1.example.com:8001 | Heap 768.0MB/1536.0MB
+
+--- CLUSTER ---
+Cluster ProdCluster: RUNNING
+  Member AdminServer: RUNNING (health: HEALTH_OK)
+  Member soa_server1: RUNNING (health: HEALTH_WARN)
+
+--- JMS ---
+JMS Server JMSServer1: RUNNING
+  [Queue] RequestQueue (Pending=10, High=50, Consumers=2)
+  [Queue] ResponseQueue (Pending=0, High=5, Consumers=1)
+
+--- THREADS ---
+Thread pool AdminServer: Total=32, Idle=20, Pending=1, Queue=0, Hogging=0, Stuck=0, Throughput=45.5
+Thread pool soa_server1: Total=48, Idle=30, Pending=2, Queue=3, Hogging=1, Stuck=0, Throughput=38.2
+
+--- DATASOURCE ---
+Datasource SOADataSource: Running, Active=12
+Datasource MDSDataSource: Running, Active=4
+
+--- DEPLOYMENTS ---
+Deployment soa-infra: ACTIVE
+Deployment SampleApp: ACTIVE
+
+--- COMPOSITES ---
+Composite default/OrderProcessor: active (version 1.0)
+Composite finance/InvoiceFlow: active (version 2.3)
+
+--- LDAP ---
+LDAP service ldap.example.com:1389 unreachable: [Errno -2] Name or service not known
