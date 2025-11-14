@@ -97,7 +97,7 @@ def main():
     if extra_args and extra_args[0] == "--":
         extra_args = extra_args[1:]
     cmd = [sys.executable, "middleware_healthcheck.py"] + extra_args
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, universal_newlines=True)
     if result.returncode != 0:
         sys.stderr.write(result.stderr)
         sys.exit(result.returncode)

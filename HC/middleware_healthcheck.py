@@ -44,7 +44,7 @@ def check_os_memory():
 def check_servers(names):
     """Check if server processes are running."""
     for name in names:
-        result = subprocess.run(['pgrep', '-fl', name], stdout=subprocess.PIPE, text=True)
+        result = subprocess.run(['pgrep', '-fl', name], stdout=subprocess.PIPE, universal_newlines=True)
         if result.stdout.strip():
             print(f"Server '{name}' is running")
         else:
@@ -111,7 +111,7 @@ def run_wlst(check, args, continue_on_error=False):
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            universal_newlines=True,
             check=False,
             env=env,
         )
