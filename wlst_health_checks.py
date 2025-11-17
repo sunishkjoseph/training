@@ -34,13 +34,10 @@ def normalize_collections(value, current_key=None):
         'destinations': lambda item: item.get('name'),
         'datasources': lambda item: item.get('name'),
         'deployments': lambda item: item.get('name'),
-        'composites': lambda item: (
-            "{}::{}".format(
-                item.get('partition') or item.get('partitionName') or 'default',
-                item.get('name')
-            )
-            if item.get('name') else None
-        ),
+        'composites': lambda item: "{}::{}".format(
+            item.get('partition') or item.get('partitionName') or 'default',
+            item.get('name')
+        ) if item.get('name') else None,
         'threads': lambda item: item.get('server') or item.get('name'),
     }
 
