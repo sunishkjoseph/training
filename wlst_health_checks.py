@@ -39,8 +39,7 @@ def normalize_collections(value, current_key=None):
                 item.get('partition') or item.get('partitionName') or 'default',
                 item.get('name')
             )
-            if item.get('name')
-            else None
+            if item.get('name') else None
         ),
         'threads': lambda item: item.get('server') or item.get('name'),
     }

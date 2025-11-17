@@ -54,8 +54,7 @@ def normalize_collections(value, current_key=None):
         'deployments': lambda item: item.get('name'),
         'composites': lambda item: (
             "{0}::{1}".format(item.get('partition') or item.get('partitionName') or 'default', item.get('name'))
-            if item.get('name')
-            else None
+            if item.get('name') else None
         ),
         'threads': lambda item: item.get('server') or item.get('name'),
     }
