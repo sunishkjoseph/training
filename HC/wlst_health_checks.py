@@ -1,5 +1,3 @@
-from __future__ import print_function
-
 """WLST script to output Oracle WebLogic health information as JSON.
 
 This script is designed to be executed via ``wlst.sh`` and prints a
@@ -9,24 +7,93 @@ JDBC datasource, deployment, and SOA composite information.
 For local testing without a WebLogic installation you can run the
 script with the standard Python interpreter by setting the
 ``WLST_SAMPLE_OUTPUT`` environment variable to point at a JSON file
-that contains sample data.
+that contains sample data. ``middleware_healthcheck.py`` wires this up
+automatically when the ``--wlst-sample-output`` option is supplied.
 """
 
-import json
+# ---------------------------------------------------------------------------
+# JSON import with failover for older WLST/Jython environments
+# ---------------------------------------------------------------------------
+try:
+    import json
+except ImportError:
+    try:
+        import simplejson as json  # Fallback if `json` is not available
+    except ImportError:
+        # Minimal JSON encoder fallback (only implements json.dumps)
+        def _json_escape_string(s):
+            if s is None:
+                return '""'
+            # Ensure we are working with a str in this Jython/Python 2 environment
+            try:
+                if not isinstance(s, basestring):
+                    s = str(s)
+            except NameError:  # basestring not defined (Python 3), not expected in WLST but kept for safety
+                if not isinstance(s, str):
+                    s = str(s)
+            s = s.replace('\\', '\\\\').replace('"', '\\"')
+            s = s.replace('\b', '\\b').replace('\f', '\\f').replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+            return '"' + s + '"'
+
+        def _json_dumps(obj):
+            # Handle primitives
+            if obj is None:
+                return 'null'
+            if isinstance(obj, bool):
+                return obj and 'true' or 'false'
+            try:
+                # Python 2: int, long
+                integer_types = (int, long)
+            except NameError:
+                integer_types = (int,)
+            if isinstance(obj, integer_types):
+                return str(obj)
+            if isinstance(obj, float):
+                return str(obj)
+            # Strings
+            try:
+                string_type = basestring
+            except NameError:
+                string_type = str
+            if isinstance(obj, string_type):
+                return _json_escape_string(obj)
+            # Lists / tuples
+            if isinstance(obj, (list, tuple)):
+                return '[' + ','.join([_json_dumps(item) for item in obj]) + ']'
+            # Dicts
+            if isinstance(obj, dict):
+                items = []
+                for k, v in obj.items():
+                    # keys must be strings in JSON
+                    try:
+                        key_is_str = isinstance(k, basestring)
+                    except NameError:
+                        key_is_str = isinstance(k, str)
+                    if not key_is_str:
+                        k = str(k)
+                    key_str = _json_escape_string(k)
+                    items.append(key_str + ':' + _json_dumps(v))
+                return '{' + ','.join(items) + '}'
+            # Fallback for other objects
+            return _json_escape_string(str(obj))
+
+        class _JsonModule(object):
+            def dumps(self, obj):
+                return _json_dumps(obj)
+
+        json = _JsonModule()
+
 import os
 import sys
 from datetime import datetime
 
 try:
-    # Python 2 / Jython friendly "open" that can accept encoding on newer runtimes
     from io import open as io_open
-except ImportError:  # pragma: no cover
+except ImportError:  # pragma: no cover - Python 2 / Jython fallback
     io_open = open
 
-# ---------------------------------------------------------------------------
-# Error tracking helpers
-# ---------------------------------------------------------------------------
 
+# Error tracking for consistent exception key generation
 _error_counters = {
     'clusters': 0,
     'managed_servers': 0,
@@ -44,21 +111,6 @@ def _get_error_key(check_type):
     return "{0}_error_{1}".format(check_type, _error_counters[check_type])
 
 
-# ---------------------------------------------------------------------------
-# Normalization helpers
-# ---------------------------------------------------------------------------
-
-def _composite_key_getter(item):
-    """Generate key for composites as partition::name."""
-    if not isinstance(item, dict):
-        return None
-    name = item.get('name')
-    if not name:
-        return None
-    partition = item.get('partition') or item.get('partitionName') or 'default'
-    return "{0}::{1}".format(partition, name)
-
-
 def normalize_collections(value, current_key=None):
     """Convert list-based collections into dictionaries keyed by names."""
 
@@ -69,67 +121,54 @@ def normalize_collections(value, current_key=None):
         'destinations': lambda item: item.get('name'),
         'datasources': lambda item: item.get('name'),
         'deployments': lambda item: item.get('name'),
-        'composites': _composite_key_getter,
+        'composites': lambda item: (
+            "{0}::{1}".format(item.get('partition') or item.get('partitionName') or 'default', item.get('name'))
+            if item.get('name') else None
+        ),
         'threads': lambda item: item.get('server') or item.get('name'),
     }
 
     if isinstance(value, list):
-        def _default_getter(item):
-            if isinstance(item, dict):
-                return item.get('name')
-            return None
-
-        getter = key_getters.get(current_key, _default_getter)
+        getter = key_getters.get(
+            current_key,
+            lambda item: item.get('name') if isinstance(item, dict) else None
+        )
         mapping = {}
         for index, item in enumerate(value):
             if isinstance(item, dict):
-                key = getter(item)
-                if not key:
-                    key = "{0}_{1}".format(current_key or 'item', index)
+                key = getter(item) or "{0}_{1}".format(current_key or 'item', index)
                 mapping[key] = normalize_collections(item, current_key)
             else:
                 mapping["{0}_{1}".format(current_key or 'item', index)] = item
         return mapping
 
     if isinstance(value, dict):
-        mapping = {}
-        for key, child in value.items():
-            mapping[key] = normalize_collections(child, key)
-        return mapping
+        return dict(
+            (key, normalize_collections(child, key))
+            for (key, child) in value.items()
+        )
 
     return value
 
 
-# ---------------------------------------------------------------------------
-# Sample payload loader
-# ---------------------------------------------------------------------------
-
 def load_sample_payload(check):
-    """Load sample payload from WLST_SAMPLE_OUTPUT, optionally filter by check."""
     path = os.environ.get('WLST_SAMPLE_OUTPUT')
     if not path or not os.path.exists(path):
         return None
 
-    # Avoid "with" so we work on very old Jython as well
     try:
-        try:
-            handle = io_open(path, 'r', encoding='utf-8')
-        except TypeError:  # encoding not supported
-            handle = io_open(path, 'r')
-        try:
+        with io_open(path, 'r', encoding='utf-8') as handle:
             payload = json.load(handle)
-        finally:
-            handle.close()
-    except Exception:
-        # If sample cannot be loaded, behave as if it doesn't exist
-        return None
+    except TypeError:  # pragma: no cover - ``encoding`` not supported
+        with io_open(path, 'r') as handle:
+            payload = json.load(handle)
 
     payload = normalize_collections(payload)
 
     if check == 'all' or check is None:
         return payload
 
-    # Filter specific section from sample JSON
+    # Filter to a specific top-level key, if present
     filtered = {}
     key_map = {
         'cluster': 'clusters',
@@ -146,10 +185,6 @@ def load_sample_payload(check):
     return filtered or payload
 
 
-# ---------------------------------------------------------------------------
-# Health / WLST helpers
-# ---------------------------------------------------------------------------
-
 def normalize_health_state(health):
     if health is None:
         return None
@@ -163,7 +198,6 @@ def normalize_health_state(health):
 
 
 def connect_if_available(username, password, admin_url):
-    """Try to connect via WLST; return False if no WLST / connect() available."""
     if not (username and password and admin_url):
         return False
 
@@ -181,17 +215,12 @@ def connect_if_available(username, password, admin_url):
 
 
 def ensure_domain_runtime():
-    """Call domainRuntime() if available; return True if runtime is ready."""
     domain_runtime = globals().get('domainRuntime')
     if domain_runtime is None:
         return False
     domain_runtime()
     return True
 
-
-# ---------------------------------------------------------------------------
-# Fetchers (WLST only)
-# ---------------------------------------------------------------------------
 
 def fetch_clusters():  # pragma: no cover - WLST environment only
     clusters = {}
@@ -210,7 +239,6 @@ def fetch_clusters():  # pragma: no cover - WLST environment only
                     server_runtimes = getattr(runtime, 'getServerRuntimes', lambda: [])()
                 except Exception:  # Some WLST versions expose getServers instead
                     server_runtimes = getattr(runtime, 'getServers', lambda: [])()
-
                 for server in server_runtimes or []:
                     health = getattr(server, 'getHealthState', lambda: None)()
                     server_name = getattr(server, 'getName', lambda: None)()
@@ -220,7 +248,6 @@ def fetch_clusters():  # pragma: no cover - WLST environment only
                         'state': getattr(server, 'getState', lambda: None)(),
                         'health': normalize_health_state(health),
                     }
-
                 key = name or 'cluster_{0}'.format(len(clusters) + 1)
                 clusters[key] = cluster_info
     except Exception:
@@ -248,10 +275,7 @@ def fetch_managed_servers():  # pragma: no cover - WLST environment only
                     heap_current = None
                     heap_max = None
 
-            name = None
-            if hasattr(runtime, 'getName'):
-                name = runtime.getName()
-
+            name = getattr(runtime, 'getName', lambda: None)()
             key = name or 'server_{0}'.format(len(servers) + 1)
             servers[key] = {
                 'name': name,
@@ -277,26 +301,16 @@ def fetch_threads():  # pragma: no cover - WLST environment only
         runtimes = cmo.getServerRuntimes()
         for runtime in runtimes or []:
             name = getattr(runtime, 'getName', lambda: None)()
-            # Newer WLST: getThreadPoolRuntime(), older: getExecuteQueueRuntimes()
-            pool_runtimes = []
-            if hasattr(runtime, 'getThreadPoolRuntime'):
-                tp = runtime.getThreadPoolRuntime()
-                if tp:
-                    pool_runtimes = [tp]
-            elif hasattr(runtime, 'getExecuteQueueRuntimes'):
-                pool_runtimes = runtime.getExecuteQueueRuntimes()
-
-            for thread_runtime in pool_runtimes or []:
+            pool = getattr(runtime, 'getThreadPoolRuntime', lambda: None)()
+            if pool:
                 entry = {
                     'server': name,
-                    'name': getattr(thread_runtime, 'getName', lambda: None)(),
-                    'pendingRequests': getattr(thread_runtime, 'getPendingUserRequestCount', lambda: None)(),
-                    'completedRequests': getattr(thread_runtime, 'getCompletedRequestCount', lambda: None)(),
-                    'threadCount': getattr(thread_runtime, 'getExecuteThreadTotalCount', lambda: None)(),
-                    'hoggingThreadCount': getattr(thread_runtime, 'getHoggingThreadCount', lambda: None)(),
-                    'stuckThreadCount': getattr(thread_runtime, 'getStuckThreadCount', lambda: None)(),
+                    'executeThreadTotalCount': getattr(pool, 'getExecuteThreadTotalCount', lambda: None)(),
+                    'hoggingThreadCount': getattr(pool, 'getHoggingThreadCount', lambda: None)(),
+                    'pendingUserRequestCount': getattr(pool, 'getPendingUserRequestCount', lambda: None)(),
+                    'stuckThreadCount': getattr(pool, 'getStuckThreadCount', lambda: None)(),
                 }
-                throughput = getattr(thread_runtime, 'getThroughput', None)
+                throughput = getattr(pool, 'getThroughput', None)
                 if callable(throughput):
                     try:
                         entry['throughput'] = throughput()
@@ -321,7 +335,6 @@ def fetch_jms_servers():  # pragma: no cover - WLST environment only
             server_runtimes = getattr(jms_runtime, 'getJMSServers', lambda: [])()
         elif hasattr(cmo, 'getJMSServers'):
             server_runtimes = cmo.getJMSServers()
-
         for runtime in server_runtimes or []:
             health = getattr(runtime, 'getHealthState', lambda: None)()
             destinations = {}
@@ -329,7 +342,6 @@ def fetch_jms_servers():  # pragma: no cover - WLST environment only
                 destination_runtimes = getattr(runtime, 'getDestinations', lambda: [])()
             except Exception:
                 destination_runtimes = []
-
             for dest in destination_runtimes or []:
                 dest_name = getattr(dest, 'getName', lambda: None)()
                 key = dest_name or 'destination_{0}'.format(len(destinations) + 1)
@@ -340,7 +352,6 @@ def fetch_jms_servers():  # pragma: no cover - WLST environment only
                     'messagesHighCount': getattr(dest, 'getMessagesHighCount', lambda: None)(),
                     'consumersCurrentCount': getattr(dest, 'getConsumersCurrentCount', lambda: None)(),
                 }
-
             name = getattr(runtime, 'getName', lambda: None)()
             key = name or 'jmsServer_{0}'.format(len(servers) + 1)
             servers[key] = {
@@ -398,23 +409,19 @@ def fetch_deployments():  # pragma: no cover - WLST environment only
 
 
 def fetch_composites():  # pragma: no cover - WLST environment only
-    """Fetch SOA composite state via a custom soa_cluster_state() hook."""
     composites = {}
     try:
         soa = globals().get('soa_cluster_state')
         if soa:
-            composites_list = soa()  # custom hook provided by customer scripts
+            composites_list = soa()  # Custom hook provided by customer WLST scripts
         else:
             composites_list = []
-
         for composite in composites_list:
-            # Try to fill version if not present
-            if 'version' not in composite and hasattr(composite, 'getRevision'):
+            if 'version' not in composite and hasattr(composite, 'getRevision'):  # pragma: no cover
                 try:
                     composite['version'] = composite.getRevision()
                 except Exception:
                     composite['version'] = None
-
             name = composite.get('name')
             partition = composite.get('partition') or composite.get('partitionName')
             if name:
@@ -429,18 +436,11 @@ def fetch_composites():  # pragma: no cover - WLST environment only
     return composites
 
 
-# ---------------------------------------------------------------------------
-# Orchestration
-# ---------------------------------------------------------------------------
-
 def gather(check, username, password, admin_url):
-    """Gather requested health information."""
-    # 1) Try sample payload if provided
     sample_payload = load_sample_payload(check)
-    if sample_payload is not None and sample_payload:
+    if sample_payload is not None and not sample_payload:
         return normalize_collections(sample_payload)
 
-    # 2) Try live WLST connection
     if not connect_if_available(username, password, admin_url):
         return normalize_collections(
             {'error': 'WLST runtime not available and no sample payload supplied'}
@@ -461,7 +461,6 @@ def gather(check, username, password, admin_url):
     if check == 'composites':
         return normalize_collections({'composites': fetch_composites()})
 
-    # "all" / default case
     return normalize_collections(
         {
             'clusters': fetch_clusters(),
@@ -476,22 +475,10 @@ def gather(check, username, password, admin_url):
 
 
 def main():
-    # Arg layout (WLST): wlst.sh wlst_health_checks.py [check] [admin_url] [username] [password]
-    check = 'all'
-    if len(sys.argv) > 1:
-        check = sys.argv[1]
-
-    admin_url = None
-    if len(sys.argv) > 2:
-        admin_url = sys.argv[2]
-
-    username = None
-    if len(sys.argv) > 3:
-        username = sys.argv[3]
-
-    password = None
-    if len(sys.argv) > 4:
-        password = sys.argv[4]
+    check = sys.argv[1] if len(sys.argv) > 1 else 'all'
+    admin_url = sys.argv[2] if len(sys.argv) > 2 else None
+    username = sys.argv[3] if len(sys.argv) > 3 else None
+    password = sys.argv[4] if len(sys.argv) > 4 else None
 
     payload = gather(check, username, password, admin_url) or {}
     if 'generatedAt' not in payload:
