@@ -1,38 +1,47 @@
-"""
-WLST script to output Oracle WebLogic health information as JSON.
+"""WLST script to output Oracle WebLogic health information as JSON.
 
 This script is designed to be executed via ``wlst.sh`` and prints a
 single JSON object to ``stdout``. It supports emitting cluster, JMS,
-JDBC datasource, deployment, thread, and SOA composite information.
+JDBC datasource, deployment, thread pool, and SOA composite information.
 
-For local testing without a WebLogic installation you can run the
-script with the standard Python interpreter by setting the
-``WLST_SAMPLE_OUTPUT`` environment variable to point at a JSON file
-that contains sample data.
+It is written to be compatible with the WLST Jython version in
+WebLogic 12.2.1.4 (no Python 3 features).
 """
 
 # ---------------------------------------------------------------------------
-# JSON import with failover
+# Imports and JSON fallback
 # ---------------------------------------------------------------------------
-try:
-    import json
-except ImportError:
-    try:
-        import simplejson as json  # fallback if stdlib json not available
-    except ImportError:
-        # Extremely small JSON encoder (only `dumps`) as last-resort
-        def _json_escape_string(s):
-            try:
-                basestring_type = basestring
-            except NameError:
-                basestring_type = str
 
+import sys
+import os
+from datetime import datetime
+
+# Robust "open" alias (for CPython 3 / local testing)
+try:
+    from io import open as io_open
+except ImportError:
+    io_open = open  # WLST / older Jython
+
+
+# JSON (with failover if json module is not available in WLST)
+try:
+    import json  # noqa
+except ImportError:
+    # Try simplejson if present
+    try:
+        import simplejson as json  # noqa
+    except ImportError:
+        # Minimal JSON encoder for WLST environments with no json/simplejson
+        def _json_escape_string(s):
             if s is None:
                 return '""'
-
+            try:
+                # Python 2: basestring
+                basestring_type = basestring  # noqa
+            except NameError:
+                basestring_type = str
             if not isinstance(s, basestring_type):
                 s = str(s)
-
             s = s.replace('\\', '\\\\')
             s = s.replace('"', '\\"')
             s = s.replace('\b', '\\b')
@@ -47,29 +56,33 @@ except ImportError:
             if obj is None:
                 return 'null'
 
-            # Bool
-            if obj is True:
-                return 'true'
-            if obj is False:
+            # Booleans
+            try:
+                bool_type = bool
+            except NameError:
+                bool_type = None
+            if bool_type is not None and isinstance(obj, bool_type):
+                if obj:
+                    return 'true'
                 return 'false'
 
-            # Integers / floats
+            # Integers
             try:
-                integer_types = (int, long)
+                integer_types = (int, long)  # noqa
             except NameError:
                 integer_types = (int,)
-
             if isinstance(obj, integer_types):
                 return str(obj)
+
+            # Floats
             if isinstance(obj, float):
                 return str(obj)
 
             # Strings
             try:
-                basestring_type = basestring
+                basestring_type = basestring  # noqa
             except NameError:
                 basestring_type = str
-
             if isinstance(obj, basestring_type):
                 return _json_escape_string(obj)
 
@@ -82,10 +95,10 @@ except ImportError:
 
             # Dicts
             if isinstance(obj, dict):
-                parts = []
+                items = []
                 for k, v in obj.items():
-                    parts.append(_json_escape_string(k) + ':' + _json_dumps(v))
-                return '{' + ','.join(parts) + '}'
+                    items.append(_json_escape_string(k) + ':' + _json_dumps(v))
+                return '{' + ','.join(items) + '}'
 
             # Fallback
             return _json_escape_string(str(obj))
@@ -94,18 +107,13 @@ except ImportError:
             def dumps(self, obj):
                 return _json_dumps(obj)
 
-        json = _JsonModule()
+        json = _JsonModule()  # noqa
+
 
 # ---------------------------------------------------------------------------
-# Standard imports
+# Error tracking helpers
 # ---------------------------------------------------------------------------
-import os
-import sys
-from datetime import datetime
 
-# ---------------------------------------------------------------------------
-# Error tracking for consistent exception key generation
-# ---------------------------------------------------------------------------
 _error_counters = {
     'clusters': 0,
     'managed_servers': 0,
@@ -119,100 +127,109 @@ _error_counters = {
 
 def _get_error_key(check_type):
     """Generate unique error keys for consistent error tracking."""
-    count = _error_counters.get(check_type, 0) + 1
-    _error_counters[check_type] = count
-    return "%s_error_%d" % (check_type, count)
+    if check_type not in _error_counters:
+        _error_counters[check_type] = 0
+    _error_counters[check_type] = _error_counters[check_type] + 1
+    return "%s_error_%d" % (check_type, _error_counters[check_type])
 
 
 # ---------------------------------------------------------------------------
-# Collection normalisation helpers
+# Normalisation helpers
 # ---------------------------------------------------------------------------
+
 def _composite_key_getter(item):
-    """Build a stable key for composites: partition::name."""
+    """Key function for composites -> partition::name."""
     if not isinstance(item, dict):
         return None
     name = item.get('name')
     if not name:
         return None
-    partition = item.get('partition') or item.get('partitionName') or 'default'
-    return "%s::%s" % (partition, name)
+    partition = item.get('partition')
+    if not partition:
+        partition = item.get('partitionName')
+    if not partition:
+        partition = 'default'
+    return partition + "::" + name
 
 
 def normalize_collections(value, current_key=None):
-    """
-    Convert list-based collections into dictionaries keyed by names.
-
-    This avoids JSON arrays at top-level collections and gives stable keys.
-    """
+    """Convert list-based collections into dictionaries keyed by names."""
     key_getters = {
-        'clusters': lambda item: isinstance(item, dict) and item.get('name') or None,
-        'servers': lambda item: isinstance(item, dict) and item.get('name') or None,
-        'jmsServers': lambda item: isinstance(item, dict) and item.get('name') or None,
-        'destinations': lambda item: isinstance(item, dict) and item.get('name') or None,
-        'datasources': lambda item: isinstance(item, dict) and item.get('name') or None,
-        'deployments': lambda item: isinstance(item, dict) and item.get('name') or None,
+        'clusters': lambda item: item.get('name'),
+        'servers': lambda item: item.get('name'),
+        'jmsServers': lambda item: item.get('name'),
+        'destinations': lambda item: item.get('name'),
+        'datasources': lambda item: item.get('name'),
+        'deployments': lambda item: item.get('name'),
         'composites': _composite_key_getter,
-        'threads': lambda item: isinstance(item, dict) and (item.get('server') or item.get('name')) or None,
+        'threads': lambda item: item.get('server') or item.get('name'),
     }
 
-    # List → dict keyed by name or generated key
+    # List -> map
     if isinstance(value, list):
-        def _default_getter(item):
-            if isinstance(item, dict):
-                return item.get('name')
-            return None
-
-        getter = key_getters.get(current_key, _default_getter)
         mapping = {}
+        getter = key_getters.get(current_key, None)
         index = 0
         for item in value:
-            key = getter(item)
-            if not key:
-                key_base = current_key or 'item'
-                key = "%s_%d" % (key_base, index)
-            if isinstance(item, dict):
-                mapping[key] = normalize_collections(item, current_key)
+            key = None
+            if getter is not None:
+                key = getter(item)
             else:
-                mapping[key] = item
-            index += 1
+                if isinstance(item, dict):
+                    key = item.get('name')
+            if not key:
+                if current_key:
+                    key = "%s_%d" % (current_key, index)
+                else:
+                    key = "item_%d" % index
+            mapping[key] = normalize_collections(item, current_key)
+            index = index + 1
         return mapping
 
-    # Dict → recurse on children
+    # Dict -> recursively normalise children
     if isinstance(value, dict):
         mapping = {}
         for key, child in value.items():
             mapping[key] = normalize_collections(child, key)
         return mapping
 
-    # Primitive values
+    # Base case
     return value
 
 
 # ---------------------------------------------------------------------------
-# Sample payload support (for local testing)
+# Sample payload (for local CPython testing)
 # ---------------------------------------------------------------------------
+
 def load_sample_payload(check):
+    """Load sample payload from WLST_SAMPLE_OUTPUT (for local testing).
+
+    In WLST (Jython) if json.load is not available or parsing fails,
+    this simply returns None.
+    """
     path = os.environ.get('WLST_SAMPLE_OUTPUT')
     if not path or not os.path.exists(path):
         return None
 
-    # If our json module does not support `load`, just skip sample.
-    if not hasattr(json, 'load'):
-        return None
-
+    payload = None
     try:
-        f = open(path, 'r')
+        # Prefer encoding-aware open if supported
         try:
-            payload = json.load(f)
-        finally:
-            f.close()
-    except TypeError:
-        # Some json implementations don't accept encoding keyword, etc.
-        f = open(path, 'r')
+            handle = io_open(path, 'r', encoding='utf-8')
+        except TypeError:
+            handle = io_open(path, 'r')
         try:
-            payload = json.load(f)
+            if hasattr(json, 'load'):
+                payload = json.load(handle)  # type: ignore
+            else:
+                payload = None
         finally:
-            f.close()
+            handle.close()
+    except Exception:
+        payload = None
+
+    if payload is None:
+        return None
 
     payload = normalize_collections(payload)
 
@@ -230,18 +247,16 @@ def load_sample_payload(check):
         'threads': 'threads',
     }
     target_key = key_map.get(check)
-    if target_key and isinstance(payload, dict) and payload.has_key(target_key):
+    if target_key and target_key in payload:
         filtered[target_key] = payload[target_key]
-        return filtered
-
-    return payload
+    return filtered or payload
 
 
 # ---------------------------------------------------------------------------
 # WLST helpers
 # ---------------------------------------------------------------------------
+
 def normalize_health_state(health):
-    """Return the raw health state string if available, else str(health)."""
     if health is None:
         return None
     getter = getattr(health, 'getState', None)
@@ -254,7 +269,7 @@ def normalize_health_state(health):
 
 
 def connect_if_available(username, password, admin_url):
-    """Try to connect via WLST if connect() is available."""
+    """Connect to admin server via WLST if possible."""
     if not (username and password and admin_url):
         return False
 
@@ -265,18 +280,23 @@ def connect_if_available(username, password, admin_url):
     try:
         connect_fn(username, password, admin_url)
         return True
-    except Exception, exc:
+    except Exception:
+        # Must still emit JSON so wrapper does not fail on decoding
+        exc = sys.exc_info()[1]
+        error_payload = {
+            'error': 'Failed to connect via WLST: %s' % str(exc),
+        }
+        # Use fallback json.dumps (module or custom)
         try:
-            error_payload = {'error': 'Failed to connect via WLST: %s' % exc}
-            print json.dumps(error_payload)
+            out = json.dumps(error_payload)
         except Exception:
-            # Last resort: plain print
-            print 'Failed to connect via WLST: %s' % exc
+            out = '{"error":"Failed to connect via WLST (and json.dumps failed)"}'
+        print(out)
         sys.exit(1)
 
 
 def ensure_domain_runtime():
-    """Switch WLST to domainRuntime tree if possible."""
+    """Ensure domainRuntime() has been called (WLST online)."""
     domain_runtime = globals().get('domainRuntime')
     if domain_runtime is None:
         return False
@@ -285,8 +305,9 @@ def ensure_domain_runtime():
 
 
 # ---------------------------------------------------------------------------
-# Fetch functions (each wrapped in try/except to avoid blowing up)
+# Fetch functions (WLST online only)
 # ---------------------------------------------------------------------------
+
 def fetch_clusters():
     clusters = {}
     try:
@@ -300,33 +321,29 @@ def fetch_clusters():
                     'state': getattr(runtime, 'getState', lambda: None)(),
                     'servers': {},
                 }
-
-                # getServerRuntimes vs getServers depending on WLS version
+                # Some WLST versions provide getServerRuntimes; others use getServers
                 try:
                     server_runtimes = getattr(runtime, 'getServerRuntimes', lambda: [])()
                 except Exception:
                     server_runtimes = getattr(runtime, 'getServers', lambda: [])()
-
-                if server_runtimes is None:
-                    server_runtimes = []
-
-                for server in server_runtimes:
-                    health = getattr(server, 'getHealthState', lambda: None)()
-                    server_name = getattr(server, 'getName', lambda: None)()
-                    key = server_name
-                    if not key:
-                        key = 'server_%d' % (len(cluster_info['servers']) + 1)
-                    cluster_info['servers'][key] = {
-                        'name': server_name,
-                        'state': getattr(server, 'getState', lambda: None)(),
-                        'health': normalize_health_state(health),
-                    }
-
+                if server_runtimes:
+                    for server in server_runtimes:
+                        health = getattr(server, 'getHealthState', lambda: None)()
+                        server_name = getattr(server, 'getName', lambda: None)()
+                        key = server_name
+                        if not key:
+                            key = "server_%d" % (len(cluster_info['servers']) + 1)
+                        cluster_info['servers'][key] = {
+                            'name': server_name,
+                            'state': getattr(server, 'getState', lambda: None)(),
+                            'health': normalize_health_state(health),
+                        }
                 key = name
                 if not key:
-                    key = 'cluster_%d' % (len(clusters) + 1)
+                    key = "cluster_%d" % (len(clusters) + 1)
                 clusters[key] = cluster_info
-    except Exception, exc:
+    except Exception:
+        exc = sys.exc_info()[1]
         key = _get_error_key('clusters')
         clusters[key] = {'name': 'ERROR', 'state': str(exc)}
     return clusters
@@ -337,38 +354,37 @@ def fetch_managed_servers():
     try:
         ensure_domain_runtime()
         runtimes = cmo.getServerRuntimes()
-        if not runtimes:
-            runtimes = []
-        for runtime in runtimes:
-            health = getattr(runtime, 'getHealthState', lambda: None)()
-            heap_runtime = getattr(runtime, 'getJVMRuntime', lambda: None)()
+        if runtimes:
+            for runtime in runtimes:
+                health = getattr(runtime, 'getHealthState', lambda: None)()
+                heap_runtime = getattr(runtime, 'getJVMRuntime', lambda: None)()
+                heap_current = None
+                heap_max = None
+                if heap_runtime:
+                    try:
+                        heap_current = heap_runtime.getHeapSizeCurrent()
+                        heap_max = heap_runtime.getHeapSizeMax()
+                    except Exception:
+                        heap_current = None
+                        heap_max = None
 
-            heap_current = None
-            heap_max = None
-            if heap_runtime:
-                try:
-                    heap_current = heap_runtime.getHeapSizeCurrent()
-                    heap_max = heap_runtime.getHeapSizeMax()
-                except Exception:
-                    heap_current = None
-                    heap_max = None
+                name = getattr(runtime, 'getName', lambda: None)()
+                key = name
+                if not key:
+                    key = "server_%d" % (len(servers) + 1)
 
-            name = getattr(runtime, 'getName', lambda: None)()
-            key = name
-            if not key:
-                key = 'server_%d' % (len(servers) + 1)
-
-            servers[key] = {
-                'name': name,
-                'state': getattr(runtime, 'getState', lambda: None)(),
-                'cluster': getattr(runtime, 'getClusterName', lambda: None)(),
-                'health': normalize_health_state(health),
-                'listenAddress': getattr(runtime, 'getListenAddress', lambda: None)(),
-                'listenPort': getattr(runtime, 'getListenPort', lambda: None)(),
-                'heapCurrent': heap_current,
-                'heapMax': heap_max,
-            }
-    except Exception, exc:
+                servers[key] = {
+                    'name': name,
+                    'state': getattr(runtime, 'getState', lambda: None)(),
+                    'cluster': getattr(runtime, 'getClusterName', lambda: None)(),
+                    'health': normalize_health_state(health),
+                    'listenAddress': getattr(runtime, 'getListenAddress', lambda: None)(),
+                    'listenPort': getattr(runtime, 'getListenPort', lambda: None)(),
+                    'heapCurrent': heap_current,
+                    'heapMax': heap_max,
+                }
+    except Exception:
+        exc = sys.exc_info()[1]
         key = _get_error_key('managed_servers')
         servers[key] = {'name': 'ERROR', 'state': str(exc)}
     return servers
@@ -379,30 +395,43 @@ def fetch_threads():
     try:
         ensure_domain_runtime()
         runtimes = cmo.getServerRuntimes()
-        if not runtimes:
-            runtimes = []
-        for runtime in runtimes:
-            server_name = getattr(runtime, 'getName', lambda: None)()
-            pool = getattr(runtime, 'getThreadPoolRuntime', lambda: None)()
-            entry = {
-                'server': server_name,
-            }
-            if pool:
-                entry['executeThreadTotalCount'] = getattr(pool, 'getExecuteThreadTotalCount', lambda: None)()
-                entry['executeThreadIdleCount'] = getattr(pool, 'getExecuteThreadIdleCount', lambda: None)()
-                entry['hoggingThreadCount'] = getattr(pool, 'getHoggingThreadCount', lambda: None)()
-                entry['pendingUserRequestCount'] = getattr(pool, 'getPendingUserRequestCount', lambda: None)()
-                throughput = getattr(pool, 'getThroughput', None)
+        if runtimes:
+            for runtime in runtimes:
+                name = getattr(runtime, 'getName', lambda: None)()
+                entry = {
+                    'server': name,
+                    'state': getattr(runtime, 'getState', lambda: None)(),
+                }
+                # Main thread pool
+                pool = getattr(runtime, 'getThreadPoolRuntime', lambda: None)()
+                if pool:
+                    for attr in [
+                        'getExecuteThreadTotalCount',
+                        'getExecuteThreadIdleCount',
+                        'getPendingUserRequestCount',
+                        'getQueueLength',
+                    ]:
+                        getter = getattr(pool, attr, None)
+                        if callable(getter):
+                            try:
+                                value = getter()
+                            except Exception:
+                                value = None
+                            entry[attr.replace('get', '', 1)] = value
+                # Throughput if available
+                throughput = getattr(runtime, 'getThroughput', None)
                 if callable(throughput):
                     try:
                         entry['throughput'] = throughput()
                     except Exception:
                         entry['throughput'] = None
-            key = server_name
-            if not key:
-                key = 'threadPool_%d' % (len(thread_pools) + 1)
-            thread_pools[key] = entry
-    except Exception, exc:
+
+                key = name
+                if not key:
+                    key = "threadPool_%d" % (len(thread_pools) + 1)
+                thread_pools[key] = entry
+    except Exception:
+        exc = sys.exc_info()[1]
         key = _get_error_key('threads')
         thread_pools[key] = {'server': 'ERROR', 'state': str(exc)}
     return thread_pools
@@ -419,45 +448,44 @@ def fetch_jms_servers():
         elif hasattr(cmo, 'getJMSServers'):
             server_runtimes = cmo.getJMSServers()
 
-        if not server_runtimes:
-            server_runtimes = []
+        if server_runtimes:
+            for runtime in server_runtimes:
+                health = getattr(runtime, 'getHealthState', lambda: None)()
+                destinations = {}
+                # Destinations
+                try:
+                    destination_runtimes = getattr(runtime, 'getDestinations', lambda: [])()
+                except Exception:
+                    destination_runtimes = []
+                if destination_runtimes:
+                    index = 0
+                    for dest in destination_runtimes:
+                        dest_name = getattr(dest, 'getName', lambda: None)()
+                        key = dest_name
+                        if not key:
+                            key = "destination_%d" % (len(destinations) + 1)
+                        destinations[key] = {
+                            'name': dest_name,
+                            'type': getattr(dest, 'getType', lambda: None)(),
+                            'messagesCurrentCount': getattr(dest, 'getMessagesCurrentCount', lambda: None)(),
+                            'messagesHighCount': getattr(dest, 'getMessagesHighCount', lambda: None)(),
+                            'consumersCurrentCount': getattr(dest, 'getConsumersCurrentCount', lambda: None)(),
+                        }
+                        index = index + 1
 
-        for runtime in server_runtimes:
-            health = getattr(runtime, 'getHealthState', lambda: None)()
-            destinations = {}
-
-            try:
-                destination_runtimes = getattr(runtime, 'getDestinations', lambda: [])()
-            except Exception:
-                destination_runtimes = []
-
-            if not destination_runtimes:
-                destination_runtimes = []
-
-            for dest in destination_runtimes:
-                dest_name = getattr(dest, 'getName', lambda: None)()
-                key = dest_name
+                name = getattr(runtime, 'getName', lambda: None)()
+                key = name
                 if not key:
-                    key = 'destination_%d' % (len(destinations) + 1)
-                destinations[key] = {
-                    'name': dest_name,
-                    'type': getattr(dest, 'getType', lambda: None)(),
-                    'messagesCurrentCount': getattr(dest, 'getMessagesCurrentCount', lambda: None)(),
-                    'messagesHighCount': getattr(dest, 'getMessagesHighCount', lambda: None)(),
-                    'consumersCurrentCount': getattr(dest, 'getConsumersCurrentCount', lambda: None)(),
-                }
+                    key = "jmsServer_%d" % (len(servers) + 1)
 
-            name = getattr(runtime, 'getName', lambda: None)()
-            key = name
-            if not key:
-                key = 'jmsServer_%d' % (len(servers) + 1)
-            servers[key] = {
-                'name': name,
-                'state': getattr(runtime, 'getState', lambda: None)(),
-                'health': normalize_health_state(health),
-                'destinations': destinations,
-            }
-    except Exception, exc:
+                servers[key] = {
+                    'name': name,
+                    'state': getattr(runtime, 'getState', lambda: None)(),
+                    'health': normalize_health_state(health),
+                    'destinations': destinations,
+                }
+    except Exception:
+        exc = sys.exc_info()[1]
         key = _get_error_key('jms_servers')
         servers[key] = {'name': 'ERROR', 'state': str(exc)}
     return servers
@@ -469,20 +497,18 @@ def fetch_datasources():
         ensure_domain_runtime()
         service = cmo.getJDBCServiceRuntime()
         if service:
-            runtimes = service.getJDBCDataSourceRuntimeMBeans()
-            if not runtimes:
-                runtimes = []
-            for runtime in runtimes:
+            for runtime in service.getJDBCDataSourceRuntimeMBeans():
                 name = runtime.getName()
                 key = name
                 if not key:
-                    key = 'datasource_%d' % (len(datasources) + 1)
+                    key = "datasource_%d" % (len(datasources) + 1)
                 datasources[key] = {
                     'name': name,
                     'state': runtime.getState(),
                     'activeConnectionsCurrentCount': runtime.getActiveConnectionsCurrentCount(),
                 }
-    except Exception, exc:
+    except Exception:
+        exc = sys.exc_info()[1]
         key = _get_error_key('datasources')
         datasources[key] = {'name': 'ERROR', 'state': str(exc)}
     return datasources
@@ -494,87 +520,81 @@ def fetch_deployments():
         ensure_domain_runtime()
         runtime = cmo.lookupAppRuntimeStateRuntime()
         if runtime:
-            apps = runtime.getAppDeploymentStateRuntimes()
-            if not apps:
-                apps = []
-            for app in apps:
+            for app in runtime.getAppDeploymentStateRuntimes():
                 name = app.getName()
                 key = name
                 if not key:
-                    key = 'deployment_%d' % (len(deployments) + 1)
+                    key = "deployment_%d" % (len(deployments) + 1)
                 deployments[key] = {
                     'name': name,
                     'state': app.getState(),
                 }
-    except Exception, exc:
+    except Exception:
+        exc = sys.exc_info()[1]
         key = _get_error_key('deployments')
         deployments[key] = {'name': 'ERROR', 'state': str(exc)}
     return deployments
 
 
 def fetch_composites():
-    """
-    Fetch SOA composites using a custom WLST helper `soa_cluster_state` if present.
+    """Fetch SOA composites.
 
-    Customer is expected to define `soa_cluster_state()` in WLST environment
-    that returns a list of dictionaries describing composites.
+    This expects a helper callable 'soa_cluster_state' to be present in
+    globals() when running in a SOA-enabled domain. If not present, an
+    empty dict is returned.
     """
     composites = {}
     try:
         soa = globals().get('soa_cluster_state')
         if soa:
-            composites_list = soa()
+            composites_list = soa()  # Custom hook provided by user WLST scripts
         else:
             composites_list = []
 
-        if not composites_list:
-            composites_list = []
-
-        for composite in composites_list:
-            # Ensure dict-like
-            if not isinstance(composite, dict):
-                continue
-
-            # Ensure we have a 'version' field if possible
-            if (not composite.has_key('version')) and hasattr(composite, 'getRevision'):
-                try:
-                    composite['version'] = composite.getRevision()
-                except Exception:
-                    composite['version'] = None
-
-            name = composite.get('name')
-            partition = composite.get('partition') or composite.get('partitionName')
-            if partition is None:
-                partition = 'default'
-
-            if name:
-                key = "%s::%s" % (partition, name)
-            else:
-                key = "composite_%d" % (len(composites) + 1)
-
-            composites[key] = composite
-    except Exception, exc:
+        if composites_list:
+            for composite in composites_list:
+                # composite is expected to be a dict-like structure
+                if isinstance(composite, dict):
+                    if 'version' not in composite and hasattr(composite, 'getRevision'):
+                        try:
+                            composite['version'] = composite.getRevision()
+                        except Exception:
+                            composite['version'] = None
+                    name = composite.get('name')
+                    partition = composite.get('partition')
+                    if not partition:
+                        partition = composite.get('partitionName')
+                    if not partition:
+                        partition = 'default'
+                    if name:
+                        key = partition + "::" + name
+                    else:
+                        key = "composite_%d" % (len(composites) + 1)
+                    composites[key] = composite
+    except Exception:
+        exc = sys.exc_info()[1]
         key = _get_error_key('composites')
         composites[key] = {'name': 'ERROR', 'state': str(exc)}
     return composites
 
 
 # ---------------------------------------------------------------------------
-# Gather / main
+# Top-level gather
 # ---------------------------------------------------------------------------
+
 def gather(check, username, password, admin_url):
-    # 1) Try sample payload if configured
+    # 1) Sample payload (local CPython testing)
     sample_payload = load_sample_payload(check)
-    if sample_payload is not None and sample_payload != {}:
+    if sample_payload is not None:
         return normalize_collections(sample_payload)
 
-    # 2) Try live WLST connection if possible
+    # 2) WLST connection
     if not connect_if_available(username, password, admin_url):
         return normalize_collections(
             {'error': 'WLST runtime not available and no sample payload supplied'}
         )
 
-    # 3) Execute requested check
+    # 3) Dispatch based on "check"
     if check == 'cluster':
         return normalize_collections({'clusters': fetch_clusters()})
     if check == 'managed_servers':
@@ -590,7 +610,7 @@ def gather(check, username, password, admin_url):
     if check == 'composites':
         return normalize_collections({'composites': fetch_composites()})
 
-    # Default: everything
+    # 4) Default: everything
     return normalize_collections(
         {
             'clusters': fetch_clusters(),
@@ -604,9 +624,12 @@ def gather(check, username, password, admin_url):
     )
 
 
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
 def main():
-    # Command line:
-    #   wlst.sh wlst_health_checks.py [check] [admin_url] [user] [password]
+    # Arguments: check, admin_url, username, password
     check = 'all'
     if len(sys.argv) > 1:
         check = sys.argv[1]
@@ -624,13 +647,21 @@ def main():
         password = sys.argv[4]
 
     payload = gather(check, username, password, admin_url) or {}
-    if not payload.has_key('generatedAt'):
-        payload['generatedAt'] = datetime.utcnow().isoformat() + 'Z'
-    if not payload.has_key('check'):
+    if 'generatedAt' not in payload:
+        try:
+            payload['generatedAt'] = datetime.utcnow().isoformat() + 'Z'
+        except Exception:
+            payload['generatedAt'] = ''
+
+    if 'check' not in payload:
         payload['check'] = check
 
-    # Use plain print statement for Python 2 / Jython compatibility
-    print json.dumps(payload)
+    try:
+        out = json.dumps(payload)
+    except Exception:
+        # Last-resort fallback
+        out = '{"error":"Failed to encode payload as JSON"}'
+    print(out)
 
 
 if __name__ == '__main__':
