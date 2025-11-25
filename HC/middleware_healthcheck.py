@@ -1,461 +1,315 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+Middleware health-check wrapper for WLST-based health collector.
+
+- Reads configuration from a YAML file (sample_config.yaml style)
+- Invokes WLST (or python for local testing) with wlst_health_checks.py
+- Captures stdout (including WLST banner) into a temp file
+- Extracts only the JSON payload from that text and parses it
+- Prints per-check banners like:
+      --- THREADS ---
+  and can be extended to write combined reports.
+"""
+
+from __future__ import print_function
+
 import argparse
+import datetime
 import json
 import os
-import subprocess
 import sys
-from pathlib import Path
-from socket import create_connection
+import tempfile
+import subprocess
 
 try:
-    import psutil
-except ImportError:  # pragma: no cover - optional dependency
-    psutil = None
+    import yaml
+except ImportError:
+    yaml = None  # You can replace this with your own minimal YAML loader if needed
 
 
-def check_os_cpu():
-    """Print the current CPU usage."""
-    if psutil:
-        usage = psutil.cpu_percent(interval=1)
-        cpus = psutil.cpu_count()
-    else:
-        usage = os.getloadavg()[0] * 100 / (os.cpu_count() or 1)
-        cpus = os.cpu_count() or 1
-    print(f"CPU usage: {usage:.2f}% ({cpus} cores)")
+# ---------------------------------------------------------------------------
+# Helper: safe printing
+# ---------------------------------------------------------------------------
+
+def eprint(*args, **kwargs):
+    """Print to stderr."""
+    kwargs.setdefault("file", sys.stderr)
+    print(*args, **kwargs)
 
 
-def check_os_memory():
-    """Print the current memory usage."""
-    if psutil:
-        mem = psutil.virtual_memory()
-        total = mem.total / (1024 * 1024)
-        usage = mem.percent
-    else:
-        meminfo = {}
-        with open('/proc/meminfo') as f:
-            for line in f:
-                key, value = line.split(':')
-                meminfo[key] = int(value.strip().split()[0])
-        total = meminfo['MemTotal'] / 1024
-        free = (meminfo.get('MemFree', 0) + meminfo.get('Buffers', 0) + meminfo.get('Cached', 0)) / 1024
-        usage = 100 * (1 - free / total)
-    print(f"Memory usage: {usage:.2f}% of {total:.0f}MB")
+# ---------------------------------------------------------------------------
+# JSON extraction from WLST banner output
+# ---------------------------------------------------------------------------
 
-
-def check_servers(names):
-    """Check if server processes are running."""
-    for name in names:
-        result = subprocess.run(['pgrep', '-fl', name], stdout=subprocess.PIPE, universal_newlines=True)
-        if result.stdout.strip():
-            print(f"Server '{name}' is running")
-        else:
-            print(f"Server '{name}' is NOT running")
-
-
-def placeholder(message):
-    """Explain that a WLST-backed implementation is required for a check."""
-
-    print(
-        f"[INFO] {message} check is unavailable because no WLST script has been configured. "
-        "Provide the --wlst-path/--wlst-exec and --wlst-script parameters or update the config file."
-    )
-
-
-def iter_named_items(value, default_key='name'):
-    """Yield (name, payload) pairs from dict- or list-like collections."""
-
-    if isinstance(value, dict):
-        for key, payload in value.items():
-            yield key, payload
-        return
-
-    for payload in value or []:
-        if isinstance(payload, dict):
-            yield payload.get(default_key), payload
-        else:
-            yield None, payload
-
-
-def run_wlst(check, args, continue_on_error=False):
-    """Invoke the configured WLST script and return the JSON payload it emits.
-    
-    Args:
-        check: The check type to run
-        args: Command line arguments
-        continue_on_error: If True, attempt to parse partial output even on non-zero exit
+def extract_json_from_wlst_output(raw_output):
     """
-    exec_path = getattr(args, 'wlst_path', None) or getattr(args, 'wlst_exec', None)
-    script_path = getattr(args, 'wlst_script', None)
+    Given the *full* WLST stdout (including banner lines), return the JSON substring.
 
-    if not script_path or not exec_path:
-        placeholder(check.title())
-        return None
+    Strategy:
+    - Find the first '{' or '[' in the entire string -> JSON start.
+    - Find the last '}' or ']' in the entire string -> JSON end.
+    - Take that slice and strip whitespace.
+    """
 
-    script_path = str(Path(script_path).expanduser().resolve())
-    exec_path = str(Path(exec_path).expanduser())
+    if not raw_output:
+        raise ValueError("WLST output is empty")
 
-    command = [
-        exec_path,
-        script_path,
-        check,
-        args.admin_url or '',
-        args.username or '',
-        args.password or '',
-    ]
+    start_idx = None
+    for i, ch in enumerate(raw_output):
+        if ch in ('{', '['):
+            start_idx = i
+            break
 
-    env = os.environ.copy()
-    if getattr(args, 'wlst_sample_output', None):
-        env['WLST_SAMPLE_OUTPUT'] = args.wlst_sample_output
+    if start_idx is None:
+        raise ValueError("No JSON start character ('{' or '[') found in WLST output")
 
-    try:
-        result = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True,
-            check=False,
-            env=env,
-        )
-    except FileNotFoundError as exc:
-        print(f"[ERROR] WLST executable '{exec_path}' not found: {exc}")
-        return None
+    last_curly = raw_output.rfind('}')
+    last_square = raw_output.rfind(']')
+    end_idx = max(last_curly, last_square)
 
-    if result.returncode != 0:
-        error_msg = f"[ERROR] WLST returned {result.returncode}: {result.stderr.strip() or result.stdout.strip()}"
-        print(error_msg)
-        
-        # If continue_on_error is set, attempt to parse partial output
-        if continue_on_error and (result.stdout or result.stderr):
-            print("[INFO] Attempting to parse partial WLST output...")
-        else:
-            return None
+    if end_idx == -1 or end_idx < start_idx:
+        raise ValueError("No valid JSON end character ('}' or ']') found in WLST output")
 
-    payload = result.stdout.strip() or result.stderr.strip()
-    if not payload:
-        print("[ERROR] WLST script produced no output")
-        return None
+    json_chunk = raw_output[start_idx:end_idx + 1].strip()
+    if not json_chunk:
+        raise ValueError("Extracted JSON chunk is empty after trimming")
 
-    # WLST may emit log lines. Locate the final JSON structure.
-    for line in reversed(payload.splitlines()):
-        candidate = line.strip()
-        if candidate.startswith('{') or candidate.startswith('['):
-            try:
-                return json.loads(candidate)
-            except json.JSONDecodeError:
-                continue
-
-    try:
-        return json.loads(payload)
-    except json.JSONDecodeError as exc:
-        print(f"[ERROR] Unable to decode WLST output as JSON: {exc}\nRaw output:\n{payload}")
-        return None
+    return json_chunk
 
 
-def check_cluster(args):
-    """Check cluster state via WLST."""
-
-    continue_on_error = getattr(args, 'continue_on_wlst_error', False)
-    data = run_wlst('cluster', args, continue_on_error=continue_on_error)
-    if not data:
-        return
-
-    clusters = data.get('clusters') or data.get('items', {})
-    if not clusters:
-        print("No clusters found")
-    for name, cluster in iter_named_items(clusters):
-        state = cluster.get('state') or cluster.get('status') or cluster.get('stateReturn')
-        print(f"Cluster {name}: {state}")
-        for server_name, server in iter_named_items(cluster.get('servers', {})):
-            server_state = server.get('state') or server.get('status')
-            health = server.get('health')
-            details = f" (health: {health})" if health else ''
-            print(f"  Member {server_name}: {server_state}{details}")
-
-
-def check_managed_servers(args):
-    """Check managed server runtimes via WLST."""
-
-    continue_on_error = getattr(args, 'continue_on_wlst_error', False)
-    data = run_wlst('managed_servers', args, continue_on_error=continue_on_error)
-    if not data:
-        return
-
-    servers = data.get('servers') or data.get('items', {})
-    for name, server in iter_named_items(servers):
-        state = server.get('state') or server.get('status')
-        health = server.get('health')
-        cluster = server.get('cluster')
-        heap_current = server.get('heapCurrent')
-        heap_max = server.get('heapMax')
-        heap_info = ''
-        if heap_current is not None and heap_max not in (None, 0):
-            try:
-                heap_info = f" | Heap {float(heap_current)/1024/1024:.1f}MB/{float(heap_max)/1024/1024:.1f}MB"
-            except (TypeError, ValueError):
-                heap_info = f" | Heap {heap_current}/{heap_max}"
-        cluster_info = f" | Cluster {cluster}" if cluster else ''
-        health_info = f" | Health {health}" if health else ''
-        address = server.get('listenAddress')
-        port = server.get('listenPort')
-        endpoint = f" | {address}:{port}" if address or port else ''
-        print(f"Server {name}: {state}{health_info}{cluster_info}{endpoint}{heap_info}")
-
-
-def check_jms(args):
-    """Check JMS runtimes via WLST."""
-
-    continue_on_error = getattr(args, 'continue_on_wlst_error', False)
-    data = run_wlst('jms', args, continue_on_error=continue_on_error)
-    if not data:
-        return
-
-    for name, jms in iter_named_items(data.get('jmsServers') or data.get('items', {})):
-        state = jms.get('state') or jms.get('health') or jms.get('healthState', {}).get('state')
-        print(f"JMS Server {name}: {state}")
-        for dest_name, destination in iter_named_items(jms.get('destinations')):
-            dest_type = destination.get('type')
-            pending = destination.get('messagesCurrentCount')
-            high = destination.get('messagesHighCount')
-            consumers = destination.get('consumersCurrentCount')
-            metrics = []
-            if pending is not None:
-                metrics.append(f"Pending={pending}")
-            if high is not None:
-                metrics.append(f"High={high}")
-            if consumers is not None:
-                metrics.append(f"Consumers={consumers}")
-            metrics_str = f" ({', '.join(metrics)})" if metrics else ''
-            type_str = f"[{dest_type}] " if dest_type else ''
-            print(f"  {type_str}{dest_name}{metrics_str}")
-
-
-def check_threads(args):
-    """Check thread pool runtime statistics via WLST."""
-
-    continue_on_error = getattr(args, 'continue_on_wlst_error', False)
-    data = run_wlst('threads', args, continue_on_error=continue_on_error)
-    if not data:
-        return
-
-    pools = data.get('threads') or data.get('threadPools') or data.get('items', {})
-    if not pools:
-        print("No thread pool data returned")
-        return
-
-    for server_key, pool in iter_named_items(pools, default_key='server'):
-        server = server_key or pool.get('server') or pool.get('name')
-        total = pool.get('executeThreadTotalCount')
-        idle = pool.get('executeThreadIdleCount')
-        hogging = pool.get('hoggingThreadCount')
-        stuck = pool.get('stuckThreadCount')
-        pending = pool.get('pendingUserRequestCount')
-        queue = pool.get('queueLength')
-        throughput = pool.get('throughput')
-
-        metrics = []
-        if total is not None:
-            metrics.append(f"Total={total}")
-        if idle is not None:
-            metrics.append(f"Idle={idle}")
-        if pending is not None:
-            metrics.append(f"Pending={pending}")
-        if queue is not None:
-            metrics.append(f"Queue={queue}")
-        if hogging is not None:
-            metrics.append(f"Hogging={hogging}")
-        if stuck is not None:
-            metrics.append(f"Stuck={stuck}")
-        if throughput is not None:
-            metrics.append(f"Throughput={throughput}")
-
-        metrics_str = ', '.join(metrics) if metrics else 'No metrics reported'
-        print(f"Thread pool {server or 'unknown'}: {metrics_str}")
-
-
-def check_datasource(args):
-    """Check JDBC data sources via WLST."""
-
-    continue_on_error = getattr(args, 'continue_on_wlst_error', False)
-    data = run_wlst('datasource', args, continue_on_error=continue_on_error)
-    if not data:
-        return
-
-    for name, ds in iter_named_items(data.get('datasources') or data.get('items', {})):
-        state = ds.get('state') or ds.get('status') or ds.get('stateReturn')
-        active = ds.get('activeConnectionsCurrentCount')
-        additional = f", Active={active}" if active is not None else ''
-        print(f"Datasource {name}: {state}{additional}")
-
-
-def check_deployments(args):
-    """Check application deployments via WLST."""
-
-    continue_on_error = getattr(args, 'continue_on_wlst_error', False)
-    data = run_wlst('deployments', args, continue_on_error=continue_on_error)
-    if not data:
-        return
-
-    for name, app in iter_named_items(data.get('deployments') or data.get('items', {})):
-        state = app.get('state') or app.get('status') or app.get('stateReturn')
-        print(f"Deployment {name}: {state}")
-
-
-def check_composites(args):
-    """Check deployed SOA composites via WLST."""
-
-    continue_on_error = getattr(args, 'continue_on_wlst_error', False)
-    data = run_wlst('composites', args, continue_on_error=continue_on_error)
-    if not data:
-        return
-
-    composites = data.get('composites') or data.get('items', {})
-    for name, composite in iter_named_items(composites):
-        partition = composite.get('partition') or composite.get('partitionName')
-        composite_name = composite.get('name') or name
-        state = composite.get('state')
-        version = composite.get('version') or composite.get('revision') or composite.get('compositeVersion')
-        prefix = f"{partition}/" if partition else ''
-        version_info = f" (version {version})" if version else ''
-        print(f"Composite {prefix}{composite_name}: {state}{version_info}")
-
-
-def check_ldap(host, port):
-    """Check if LDAP host is reachable."""
-    try:
-        with create_connection((host, port), timeout=5):
-            print(f"LDAP service {host}:{port} reachable")
-    except Exception as exc:
-        print(f"LDAP service {host}:{port} unreachable: {exc}")
-
+# ---------------------------------------------------------------------------
+# Config / YAML helpers
+# ---------------------------------------------------------------------------
 
 def load_config(path):
-    """Load configuration from a JSON or YAML file."""
-    config_path = Path(path)
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file '{path}' not found")
+    """Load YAML configuration."""
+    if not os.path.exists(path):
+        raise IOError("Config file not found: {0}".format(path))
 
-    text = config_path.read_text()
-    suffix = config_path.suffix.lower()
-    if suffix in {'.yaml', '.yml'}:
-        try:
-            import yaml
-        except ImportError as exc:  # pragma: no cover - optional dependency
-            raise RuntimeError("PyYAML is required to load YAML configuration files") from exc
+    if yaml is None:
+        raise RuntimeError("PyYAML is not installed but is required to load {0}".format(path))
 
-        data = yaml.safe_load(text)
-    else:
-        data = json.loads(text)
-
-    if not isinstance(data, dict):
-        raise ValueError("Configuration file must contain a JSON/YAML object")
+    with open(path, "r") as f:
+        data = yaml.safe_load(f) or {}
     return data
 
 
-def apply_config(args, config):
-    """Merge configuration dictionary into argparse Namespace."""
+# ---------------------------------------------------------------------------
+# WLST invocation and JSON parsing
+# ---------------------------------------------------------------------------
 
-    def ensure_comma_separated(value):
-        if value is None:
-            return None
-        if isinstance(value, str):
-            return value
-        if isinstance(value, (list, tuple, set)):
-            return ','.join(str(item) for item in value)
-        return str(value)
+def run_wlst_check(check, cfg):
+    """
+    Run one WLST check (cluster, managed_servers, jms, threads, datasource, deployments, composites, all)
+    using the settings from the YAML config:
+        - admin_url
+        - username
+        - password
+        - wlst_path (e.g. wlst.sh or python3 for local testing)
+        - wlst_script (e.g. wlst_health_checks.py)
+        - wlst_sample_output (optional for local testing)
+    """
 
-    if 'full' in config and not args.full and not args.checks:
-        args.full = bool(config['full'])
-    if 'checks' in config and args.checks is None:
-        args.checks = ensure_comma_separated(config['checks'])
-    if 'servers' in config and args.servers is None:
-        args.servers = ensure_comma_separated(config['servers'])
-    if 'admin_url' in config and args.admin_url is None:
-        args.admin_url = config['admin_url']
-    if 'username' in config and args.username is None:
-        args.username = config['username']
-    if 'password' in config and args.password is None:
-        args.password = config['password']
-    if 'ldap_host' in config and args.ldap_host is None:
-        args.ldap_host = config['ldap_host']
-    if 'ldap_port' in config and (args.ldap_port == 389 or args.ldap_port is None):
+    admin_url = cfg.get("admin_url")
+    username = cfg.get("username")
+    password = cfg.get("password")
+
+    if not (admin_url and username and password):
+        raise RuntimeError("admin_url, username, and password must be set in the config")
+
+    wlst_path = cfg.get("wlst_path", "wlst.sh")
+    wlst_script = cfg.get("wlst_script", "wlst_health_checks.py")
+
+    env = os.environ.copy()
+    # For local dry-run / testing: wlst_path can be "python3", and WLST_SAMPLE_OUTPUT points
+    # to a JSON file. The wlst_health_checks.py script knows how to use it.
+    sample_output = cfg.get("wlst_sample_output")
+    if sample_output:
+        env["WLST_SAMPLE_OUTPUT"] = sample_output
+
+    cmd = [
+        wlst_path,
+        wlst_script,
+        check,
+        admin_url,
+        username,
+        password,
+    ]
+
+    eprint("[INFO] Executing:", " ".join(cmd))
+
+    # Capture stdout & stderr
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        universal_newlines=True  # text mode
+    )
+    stdout, stderr = proc.communicate()
+
+    # Always write raw output to a temp file for debugging, as you suggested
+    tmp_fd, tmp_path = tempfile.mkstemp(prefix="wlst_raw_{0}_".format(check), suffix=".log")
+    os.close(tmp_fd)
+    try:
+        with open(tmp_path, "w") as tmp_f:
+            tmp_f.write(stdout)
+            if stderr:
+                tmp_f.write("\n--- STDERR ---\n")
+                tmp_f.write(stderr)
+    except Exception:
+        # If writing fails, we ignore, because it's only for debugging
+        pass
+
+    if proc.returncode != 0:
+        # WLST itself failed
+        msg = "[ERROR] WLST returned {code}: {err}".format(
+            code=proc.returncode,
+            err=stderr.strip() or stdout.strip()
+        )
+        eprint(msg)
+        eprint("[ERROR] Raw WLST output written to:", tmp_path)
+        raise RuntimeError(msg)
+
+    # Now parse JSON part
+    try:
+        json_str = extract_json_from_wlst_output(stdout)
+        data = json.loads(json_str)
+    except Exception as exc:
+        eprint(
+            "[ERROR] Unable to decode WLST output as JSON: {0}".format(exc)
+        )
+        eprint("Raw output:")
+        eprint(stdout)
+        eprint("[ERROR] Raw WLST output saved in:", tmp_path)
+        raise
+
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Result handling / reporting
+# ---------------------------------------------------------------------------
+
+def print_section_header(title):
+    print("")
+    print("--- {0} ---".format(title.upper()))
+    print("")
+
+
+def run_all_checks(cfg, checks):
+    """
+    Run all requested checks and collect the results into a dict.
+    checks is a list of (check_name, title_string).
+    """
+    all_results = {}
+
+    for check_name, title in checks:
+        print_section_header(title)
         try:
-            args.ldap_port = int(config['ldap_port'])
-        except (TypeError, ValueError):
-            raise ValueError("ldap_port must be an integer")
-    if 'wlst_path' in config and getattr(args, 'wlst_path', None) is None:
-        args.wlst_path = config['wlst_path']
-    # Handle legacy wlst_exec if wlst_path not set
-    if 'wlst_exec' in config and getattr(args, 'wlst_exec', None) is None and getattr(args, 'wlst_path', None) is None:
-        args.wlst_exec = config['wlst_exec']
-    if 'wlst_script' in config and getattr(args, 'wlst_script', None) is None:
-        args.wlst_script = config['wlst_script']
-    if 'wlst_sample_output' in config and getattr(args, 'wlst_sample_output', None) is None:
-        args.wlst_sample_output = config['wlst_sample_output']
+            result = run_wlst_check(check_name, cfg)
+            # Merge / store by check name
+            all_results[check_name] = result
+            # For now, just pretty-print JSON per section.
+            print(json.dumps(result, indent=2))
+        except Exception:
+            # Error already logged; continue to the next check.
+            continue
+
+    return all_results
+
+
+# ---------------------------------------------------------------------------
+# Main CLI
+# ---------------------------------------------------------------------------
+
+def build_arg_parser():
+    parser = argparse.ArgumentParser(
+        description="Middleware health-check wrapper for WLST health script."
+    )
+    parser.add_argument(
+        "config",
+        nargs="?",
+        default="sample_config.yaml",
+        help="Path to YAML config file (default: sample_config.yaml)",
+    )
+    parser.add_argument(
+        "--check",
+        dest="check",
+        default=None,
+        help=(
+            "Single check to run. One of: cluster, managed_servers, jms, "
+            "threads, datasource, deployments, composites, all. "
+            "If omitted, uses config['full'] to decide whether to run all."
+        ),
+    )
+    return parser
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Oracle Fusion Middleware health check tool')
-    parser.add_argument('--config', help='Path to JSON/YAML file containing parameters')
-    parser.add_argument('--full', action='store_true', help='Run full health check')
-    parser.add_argument('--checks', help='Comma separated list of checks to run')
-    parser.add_argument('--servers', help='Comma separated names of server processes to validate')
-    parser.add_argument('--admin-url', help='Admin server base URL (e.g. http://host:7001)')
-    parser.add_argument('--username', help='Admin username for WLST checks')
-    parser.add_argument('--password', help='Admin password for WLST checks')
-    parser.add_argument('--ldap-host', help='LDAP hostname to check')
-    parser.add_argument('--ldap-port', type=int, default=389, help='LDAP port (default 389)')
-    parser.add_argument('--wlst-path', help='Path to wlst.sh (preferred)')
-    parser.add_argument('--wlst-exec', help='Path to legacy WLST executable (deprecated)')
-    parser.add_argument('--wlst-script', help='Path to the WLST script that emits JSON status')
-    parser.add_argument('--wlst-sample-output', help='Path to a JSON file used to simulate WLST output')
-    parser.add_argument(
-        '--continue-on-wlst-error',
-        action='store_true',
-        help='Continue with other checks even if WLST checks fail (useful for monitoring)'
-    )
+    parser = build_arg_parser()
     args = parser.parse_args()
 
-    if args.config:
-        try:
-            config = load_config(args.config)
-        except Exception as exc:
-            print(f"[ERROR] {exc}")
-            sys.exit(1)
-        apply_config(args, config)
-
-    available = {
-        'cpu': check_os_cpu,
-        'memory': check_os_memory,
-        'servers': (
-            lambda: check_servers([s.strip() for s in args.servers.split(',')])
-            if args.servers
-            else placeholder('Server processes')
-        ),
-        'managed_servers': lambda: check_managed_servers(args),
-        'cluster': lambda: check_cluster(args),
-        'jms': lambda: check_jms(args),
-        'threads': lambda: check_threads(args),
-        'datasource': lambda: check_datasource(args),
-        'deployments': lambda: check_deployments(args),
-        'composites': lambda: check_composites(args),
-        'ldap': (
-            lambda: check_ldap(args.ldap_host, args.ldap_port)
-            if args.ldap_host
-            else placeholder('LDAP')
-        ),
-    }
-
-    if args.full:
-        checks = list(available.keys())
-    elif args.checks:
-        checks = [c.strip() for c in args.checks.split(',') if c.strip() in available]
-    else:
-        parser.print_help()
+    try:
+        cfg = load_config(args.config)
+    except Exception as exc:
+        eprint("[ERROR] Failed to load config {0}: {1}".format(args.config, exc))
         sys.exit(1)
 
-    for check in checks:
-        print(f"\n--- {check.upper()} ---")
-        available[check]()
+    # Default set of checks (used when full: true or check=all)
+    full_checks = [
+        ("cluster", "clusters"),
+        ("managed_servers", "managed servers"),
+        ("jms", "jms servers"),
+        ("threads", "threads"),
+        ("datasource", "datasources"),
+        ("deployments", "deployments"),
+        ("composites", "soa composites"),
+    ]
+
+    # Decide what to run
+    check = args.check
+    if not check:
+        # If no explicit --check, look at config.full
+        if bool(cfg.get("full", True)):
+            check = "all"
+        else:
+            # As a reasonable default, run only threads when full=false
+            check = "threads"
+
+    if check == "all":
+        # Run everything
+        results = run_all_checks(cfg, full_checks)
+    else:
+        # Run a single check
+        title = check
+        for name, t in full_checks:
+            if name == check:
+                title = t
+                break
+        print_section_header(title)
+        try:
+            result = run_wlst_check(check, cfg)
+            print(json.dumps(result, indent=2))
+            results = {check: result}
+        except Exception:
+            results = {}
+
+    # At this point you can pass `results` into your report_wrapper.py if needed,
+    # or write consolidated JSON/CSV files.
+    # Example: write a combined JSON with timestamp:
+    try:
+        ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        out_name = "middleware_health_report_{0}.json".format(ts)
+        with open(out_name, "w") as f:
+            json.dump(results, f, indent=2)
+        print("")
+        print("[INFO] Combined report written to:", out_name)
+    except Exception as exc:
+        eprint("[WARN] Failed to write combined report JSON:", exc)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
