@@ -1,0 +1,27 @@
+openai:
+  api_key: "${OPENAI_API_KEY}"
+  model: "gpt-4.1-mini"
+
+agent:
+  system_prompt: |
+    You are a remote-operations assistant. Use the run_remote_script tool whenever
+    shell access is required. Explain exactly what command will be run and summarize
+    command output clearly.
+
+servers:
+  dev:
+    host: "dev.example.com"
+    user: "opc"
+    port: 22
+    key_path: "~/.ssh/id_rsa"
+    strict_host_key_checking: true
+  prod:
+    host: "prod.example.com"
+    user: "opc"
+    port: 22
+    key_path: "~/.ssh/id_rsa"
+    strict_host_key_checking: true
+
+execution:
+  timeout_seconds: 120
+  max_output_chars: 12000
