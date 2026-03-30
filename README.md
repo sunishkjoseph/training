@@ -195,3 +195,12 @@ python report_wrapper.py --format html --output report.html -- --full --servers 
 python report_wrapper.py --format pdf --output report.pdf -- --full --servers AdminServer1
 python report_wrapper.py --format doc --output report.doc -- --full --servers AdminServer1
 ```
+
+## Remote Ops Agent (new)
+
+A new implementation is available under `remote-agent/` with:
+
+- FastMCP server that exposes remote SSH command execution tools.
+- Streamlit chat frontend with configurable OpenAI model and server inventory.
+
+See `remote-agent/README.md` for setup and run instructions.
